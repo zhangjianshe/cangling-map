@@ -1,0 +1,17 @@
+[package]
+name = "map-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+image.workspace = true
+map-core = { path = "../map-core" }
+map-style = { path = "../map-style" }
+thiserror.workspace = true
+
+[lints]
+workspace = true
+

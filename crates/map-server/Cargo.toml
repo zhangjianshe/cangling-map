@@ -1,0 +1,33 @@
+[package]
+name = "map-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+bytes.workspace = true
+cangling-gdal-core = { path = "../../../cangling-gdal/crates/cangling-gdal-core" }
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+image.workspace = true
+map-catalog = { path = "../map-catalog" }
+map-core = { path = "../map-core" }
+map-gdal = { path = "../map-gdal" }
+map-render = { path = "../map-render" }
+map-style = { path = "../map-style" }
+ogc-wms = { path = "../ogc-wms" }
+ogc-wmts = { path = "../ogc-wmts" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

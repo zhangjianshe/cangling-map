@@ -1,0 +1,17 @@
+[package]
+name = "map-style"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+map-core = { path = "../map-core" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quick-xml.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+/target
+*.log
+.env
+.idea/
+.vscode/
+catalog.db
+catalog.db-*
+wmts-cache/

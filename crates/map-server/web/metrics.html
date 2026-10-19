@@ -1,0 +1,22 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>指标 · Cangling Map</title><link rel="stylesheet" href="/assets/styles.css"></head><body>
+<aside><a class="brand" href="/"><i>◇</i><span><b>Cangling</b><small>地图服务</small></span></a><nav><a href="/">▦ 数据目录</a><a href="/published-layers">◫ 发布图层</a><a href="/styles">◒ 样式管理</a><a href="/layer-groups">⊞ 图层组</a><label>资源</label><a href="/style-assets">▧ 图片资源</a><label>服务</label><a class="active" href="/metrics">⌁ 指标</a><a href="/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0">◎ WMS 服务</a><a href="/wmts?SERVICE=WMTS&REQUEST=GetCapabilities&VERSION=1.0.0">▦ WMTS 服务</a></nav><footer><em></em><span><b>服务运行中</b><small>SQLite 目录库</small></span></footer></aside>
+<main><header><div><label>运行状态</label><h1>服务指标</h1><p>观察 WMTS 请求、缓存效率和渲染性能。</p></div><div class="metrics-refresh"><span id="updated">正在获取指标…</span><button id="refresh">刷新</button></div></header>
+<div id="metrics-error" class="form-error hidden"></div>
+<section class="metrics-grid">
+  <article class="metric-card metric-primary"><span>WMTS 请求</span><strong id="wmts-requests">—</strong><small id="uptime">服务运行时间 —</small></article>
+  <article class="metric-card"><span>缓存命中率</span><strong id="cache-rate">—</strong><small id="cache-detail">命中 — · 未命中 —</small></article>
+  <article class="metric-card"><span>实际渲染</span><strong id="rendered-tiles">—</strong><small id="render-failures">失败 —</small></article>
+  <article class="metric-card"><span>合并请求</span><strong id="coalesced">—</strong><small>避免重复渲染的请求</small></article>
+</section>
+<section class="panel metrics-panel"><div class="metrics-section-head"><div><h2>渲染性能</h2><p>从本次服务启动开始累计的进程内指标。</p></div><span class="live-badge"><i></i>每 5 秒刷新</span></div><div class="metrics-detail-grid">
+  <div><span>平均渲染耗时</span><strong id="render-ms">—</strong><small>数据查询、样式匹配与 PNG 编码</small></div>
+  <div><span>平均缓存写入</span><strong id="cache-write-ms">—</strong><small>写入当前 WMTS 缓存后端</small></div>
+  <div><span>活动瓦片请求</span><strong id="active-requests">—</strong><small>正在渲染或等待相同瓦片</small></div>
+  <div><span>可用渲染并发</span><strong id="available-concurrency">—</strong><small>当前信号量剩余许可</small></div>
+  <div><span>投影缓存预算</span><strong id="projection-budget">—</strong><small>完整投影数据集 LRU 上限</small></div>
+</div></section>
+<section class="panel metrics-table-panel"><div class="metrics-section-head"><div><h2>图层指标</h2><p>按发布图层定位缓存效率和渲染瓶颈。</p></div></div><div class="metrics-table-wrap"><table><thead><tr><th>发布图层</th><th>请求</th><th>命中率</th><th>渲染</th><th>平均 / P95</th><th>准备 / 缓存写入</th><th>输出</th><th>失败</th></tr></thead><tbody id="layer-metrics"><tr><td colspan="8" class="metrics-empty">尚无图层请求</td></tr></tbody></table></div></section>
+<section class="metrics-two-column"><section class="panel metrics-panel"><div class="metrics-section-head"><div><h2>最近 15 分钟</h2><p>每分钟请求数、缓存命中率和平均响应时间。</p></div></div><div id="metric-series" class="metric-series"></div></section><section class="panel metrics-panel"><div class="metrics-section-head"><div><h2>缓存状态</h2><p>GDAL 投影结果和图片纹理缓存。</p></div></div><div id="cache-status" class="cache-status"></div></section></section>
+<section class="panel metrics-table-panel"><div class="metrics-section-head"><div><h2>最近慢请求</h2><p>总耗时超过 50 ms 的最近 50 个 WMTS 瓦片。</p></div></div><div class="metrics-table-wrap"><table><thead><tr><th>时间</th><th>图层</th><th>瓦片</th><th>总耗时</th><th>请求准备</th><th>渲染</th><th>缓存写入</th><th>定位</th></tr></thead><tbody id="slow-requests"><tr><td colspan="8" class="metrics-empty">尚无慢请求</td></tr></tbody></table></div></section>
+</main>
+<script src="/assets/metrics.js" defer></script></body></html>

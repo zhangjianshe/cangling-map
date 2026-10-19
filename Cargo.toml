@@ -1,0 +1,42 @@
+[workspace]
+members = [
+    "crates/ogc-wms",
+    "crates/ogc-wmts",
+    "crates/map-core",
+    "crates/map-catalog",
+    "crates/map-render",
+    "crates/map-gdal",
+    "crates/map-style",
+    "crates/map-server",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+image = "0.25"
+quick-xml = { version = "0.38", features = ["serialize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "=1.18.1", features = ["serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
