@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: soft.cangling.cn:22002/cangling/cangling-map
+  IMAGE: harbor.cangling.cn:22002/cangling/cangling-map
 
 permissions:
   contents: read

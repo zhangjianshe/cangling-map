@@ -90,7 +90,7 @@ VECTOR_PROJECTION_METATILE_FACTOR=4
 ```yaml
 services:
   cangling-map:
-    image: soft.cangling.cn:22002/cangling/cangling-map:latest
+    image: harbor.cangling.cn:22002/cangling/cangling-map:latest
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -173,7 +173,7 @@ docker compose -f docker-compose.cangling-tile.yml logs -f
 ```yaml
 services:
   cangling-map:
-    image: soft.cangling.cn:22002/cangling/cangling-map:latest
+    image: harbor.cangling.cn:22002/cangling/cangling-map:latest
     depends_on:
       cangling-tile:
         condition: service_healthy
@@ -228,7 +228,7 @@ volumes:
 ```bash
 kubectl create namespace cangling-map
 kubectl -n cangling-map create secret docker-registry cangling-registry \
-  --docker-server=soft.cangling.cn:22002 \
+  --docker-server=harbor.cangling.cn:22002 \
   --docker-username='<用户名>' \
   --docker-password='<密码>'
 ```
@@ -265,8 +265,8 @@ docker buildx build -t cangling-map:local .
 发布镜像：
 
 ```text
-soft.cangling.cn:22002/cangling/cangling-map:<version>
-soft.cangling.cn:22002/cangling/cangling-map:latest
+harbor.cangling.cn:22002/cangling/cangling-map:<version>
+harbor.cangling.cn:22002/cangling/cangling-map:latest
 ```
 
 GitHub 仓库需要配置 `HARBOR_USERNAME` 和 `HARBOR_PASSWORD`。执行
@@ -280,7 +280,7 @@ Repository secrets：
 
 | Secret | 必需 | 说明 |
 | --- | --- | --- |
-| `HARBOR_USERNAME` | 是 | `soft.cangling.cn:22002` 镜像仓库用户名或机器人账号 |
+| `HARBOR_USERNAME` | 是 | `harbor.cangling.cn:22002` 镜像仓库用户名或机器人账号 |
 | `HARBOR_PASSWORD` | 是 | 对应密码或机器人 Token，需要推送 `cangling/cangling-map` 的权限 |
 
 以下值由工作流或 GitHub 自动提供，不需要手动配置：
@@ -295,7 +295,7 @@ Repository secrets：
 镜像地址当前固定为：
 
 ```text
-soft.cangling.cn:22002/cangling/cangling-map
+harbor.cangling.cn:22002/cangling/cangling-map
 ```
 
 `cangling-gdal-core` 已集成到本仓库，因此不需要配置
@@ -303,8 +303,8 @@ soft.cangling.cn:22002/cangling/cangling-map
 **Run workflow** 手动触发。建议先验证机器人账号可以登录和推送：
 
 ```bash
-docker login soft.cangling.cn:22002 -u '<HARBOR_USERNAME>'
-docker push soft.cangling.cn:22002/cangling/cangling-map:<测试标签>
+docker login harbor.cangling.cn:22002 -u '<HARBOR_USERNAME>'
+docker push harbor.cangling.cn:22002/cangling/cangling-map:<测试标签>
 ```
 
 ## 中国行政区划迁移包
