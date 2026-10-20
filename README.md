@@ -212,6 +212,42 @@ volumes:
 - Cangling Map：`http://127.0.0.1:3000/`
 - Cangling Tile Dashboard：`http://127.0.0.1:7601/`
 
+## K3s 部署
+
+仓库提供 [deploy/k3s.yaml](deploy/k3s.yaml)，默认部署：
+
+- 1 个 Cangling Tile 实例；
+- 3 个 Cangling Map 实例；
+- K3s `local-path` 持久卷；
+- Cangling Map NodePort `30080`；
+- Cangling Tile Dashboard NodePort `30601`。
+
+部署前需要修改清单中的 Token、管理员密码和地图源数据 `hostPath`。如果私有镜像仓库
+需要认证，先创建拉取 Secret，再把 `imagePullSecrets` 加入两个 Pod 模板：
+
+```bash
+kubectl create namespace cangling-map
+kubectl -n cangling-map create secret docker-registry cangling-registry \
+  --docker-server=soft.cangling.cn:22002 \
+  --docker-username='<用户名>' \
+  --docker-password='<密码>'
+```
+
+应用部署并观察状态：
+
+```bash
+kubectl apply -f deploy/k3s.yaml
+kubectl -n cangling-map rollout status deployment/cangling-tile
+kubectl -n cangling-map rollout status statefulset/cangling-map
+kubectl -n cangling-map get pods,svc,pvc
+```
+
+三个 Map Pod 共享 SQLite 目录库 PVC，因此使用 `StatefulSet` 的 `OrderedReady` 顺序启动，
+并由 `ReadWriteOnce` 本地卷约束在同一 K3s 节点。每个 Pod 的预投影缓存使用独立
+`emptyDir`，WMTS 瓦片则统一写入单实例 Cangling Tile。这个清单适合单节点 K3s，或将
+三个 Map 实例固定在目录卷所在节点的部署。若要跨节点扩展 Map 服务，应先将目录存储
+从 SQLite 改为支持多节点并发访问的数据库。
+
 ## Docker 镜像与发布
 
 镜像基于官方 OSGeo GDAL 3.13：
