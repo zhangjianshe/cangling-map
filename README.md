@@ -273,6 +273,40 @@ GitHub 仓库需要配置 `HARBOR_USERNAME` 和 `HARBOR_PASSWORD`。执行
 `./release.sh` 会在干净工作区完成检查、递增补丁版本、创建版本标签并推送，随后由
 GitHub Actions 发布 amd64/arm64 镜像。
 
+### GitHub 发布配置
+
+在 GitHub 仓库中打开 **Settings → Secrets and variables → Actions**，添加以下
+Repository secrets：
+
+| Secret | 必需 | 说明 |
+| --- | --- | --- |
+| `HARBOR_USERNAME` | 是 | `soft.cangling.cn:22002` 镜像仓库用户名或机器人账号 |
+| `HARBOR_PASSWORD` | 是 | 对应密码或机器人 Token，需要推送 `cangling/cangling-map` 的权限 |
+
+以下值由工作流或 GitHub 自动提供，不需要手动配置：
+
+| 变量 | 来源 | 说明 |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | GitHub Actions | 检出当前仓库；工作流只申请 `contents: read` |
+| `GITHUB_SHA` | GitHub Actions | 写入镜像标签和 OCI revision 标签 |
+| `GITHUB_REF_NAME` | GitHub Actions | 当前发布标签，例如 `v0.1.1` |
+| `BUILD_DATE` | 镜像构建过程 | 未显式提供时由 `map-server/build.rs` 使用 UTC 日期生成 |
+
+镜像地址当前固定为：
+
+```text
+soft.cangling.cn:22002/cangling/cangling-map
+```
+
+`cangling-gdal-core` 已集成到本仓库，因此不需要配置
+`CANGLING_GDAL_TOKEN`。发布工作流由 `v*` 标签或 GitHub Actions 页面中的
+**Run workflow** 手动触发。建议先验证机器人账号可以登录和推送：
+
+```bash
+docker login soft.cangling.cn:22002 -u '<HARBOR_USERNAME>'
+docker push soft.cangling.cn:22002/cangling/cangling-map:<测试标签>
+```
+
 ## 中国行政区划迁移包
 
 `backups/ai-china` 保存配置、样式和导入导出脚本。原始 Shapefile 体积较大，默认不
