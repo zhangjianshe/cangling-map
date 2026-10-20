@@ -6,6 +6,7 @@ members = [
     "crates/map-core",
     "crates/map-catalog",
     "crates/map-render",
+    "crates/map-gpu",
     "crates/map-gdal",
     "crates/map-style",
     "crates/map-server",
