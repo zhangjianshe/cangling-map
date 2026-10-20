@@ -33,6 +33,10 @@ source fingerprint + target CRS + style revision + zoom band + spatial chunk
 `GPU_CACHE_BUDGET_MB` 后按 LRU 淘汰完整空间块。失效以数据文件指纹、样式 revision 和
 投影配置为准。
 
+`map-gpu::ByteLruCache` 已实现按估算显存字节数计费和最近使用时间淘汰。单个请求块超过预算
+时允许暂时独占缓存以完成请求，其余条目全部释放；服务接入时还需把命中、未命中、淘汰、
+常驻字节和超预算请求暴露到 metrics。
+
 ## 分阶段能力
 
 1. 索引面网格、透明混合与 4× MSAA（已完成原型和真实数据回归）；

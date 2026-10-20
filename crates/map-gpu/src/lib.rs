@@ -1,6 +1,6 @@
 //! Reusable off-screen GPU raster backend for prepared vector meshes.
 
-use std::sync::mpsc;
+use std::{collections::HashMap, hash::Hash, sync::mpsc};
 
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -138,6 +138,103 @@ pub struct PreparedScene {
     padded_bytes_per_row: u32,
     stats: PreparedSceneStats,
     atlas: Option<PreparedAtlas>,
+}
+
+/// Byte-budgeted LRU for prepared spatial chunks, label atlases and image
+/// atlases. Values are dropped on eviction, which releases their wgpu handles.
+pub struct ByteLruCache<K, V> {
+    entries: HashMap<K, CacheEntry<V>>,
+    budget_bytes: usize,
+    resident_bytes: usize,
+    clock: u64,
+}
+
+struct CacheEntry<V> {
+    value: V,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl<K: Eq + Hash, V> ByteLruCache<K, V> {
+    pub fn new(budget_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            budget_bytes,
+            resident_bytes: 0,
+            clock: 0,
+        }
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<&V> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = self.clock;
+        Some(&entry.value)
+    }
+
+    /// Inserts a value and returns entries evicted to honor the byte budget.
+    /// A single value larger than the budget is retained so a request can still
+    /// complete; all other entries are evicted in that case.
+    pub fn insert(&mut self, key: K, value: V, bytes: usize) -> Vec<(K, V)>
+    where
+        K: Clone,
+    {
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(previous) = self.entries.remove(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.bytes);
+        }
+        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+        self.entries.insert(
+            key.clone(),
+            CacheEntry {
+                value,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        let mut evicted = Vec::new();
+        while self.resident_bytes > self.budget_bytes && self.entries.len() > 1 {
+            let Some(oldest_key) = self
+                .entries
+                .iter()
+                .filter(|(candidate, _)| *candidate != &key)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(candidate, _)| candidate.clone())
+            else {
+                break;
+            };
+            let entry = self
+                .entries
+                .remove(&oldest_key)
+                .expect("entry was selected");
+            self.resident_bytes = self.resident_bytes.saturating_sub(entry.bytes);
+            evicted.push((oldest_key, entry.value));
+        }
+        evicted
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let entry = self.entries.remove(key)?;
+        self.resident_bytes = self.resident_bytes.saturating_sub(entry.bytes);
+        Some(entry.value)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.resident_bytes = 0;
+    }
 }
 
 struct DrawBatch {
@@ -674,7 +771,7 @@ fn validate_chunk(
 mod tests {
     use bytemuck::Zeroable;
 
-    use super::{validate_atlas, validate_chunk, AtlasOverlay, MeshChunk, Vertex};
+    use super::{validate_atlas, validate_chunk, AtlasOverlay, ByteLruCache, MeshChunk, Vertex};
 
     #[test]
     fn rejects_an_out_of_range_index_before_gpu_upload() {
@@ -706,5 +803,28 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_atlas(&atlas).is_err());
+    }
+
+    #[test]
+    fn byte_lru_evicts_the_least_recently_used_entry() {
+        let mut cache = ByteLruCache::new(10);
+        cache.insert("old", 1, 4);
+        cache.insert("hot", 2, 4);
+        assert_eq!(cache.get(&"old"), Some(&1));
+        let evicted = cache.insert("new", 3, 4);
+        assert_eq!(evicted, vec![("hot", 2)]);
+        assert_eq!(cache.resident_bytes(), 8);
+        assert_eq!(cache.get(&"old"), Some(&1));
+        assert_eq!(cache.get(&"new"), Some(&3));
+    }
+
+    #[test]
+    fn byte_lru_keeps_one_oversized_request() {
+        let mut cache = ByteLruCache::new(5);
+        cache.insert("small", 1, 4);
+        let evicted = cache.insert("large", 2, 12);
+        assert_eq!(evicted, vec![("small", 1)]);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.resident_bytes(), 12);
     }
 }
