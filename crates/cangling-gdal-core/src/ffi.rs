@@ -126,6 +126,13 @@ pub(crate) fn render(request: &RasterRenderRequest) -> Result<RenderedImage, Gda
 }
 
 pub(crate) fn render_vector(request: &VectorRenderRequest) -> Result<RenderedImage, GdalError> {
+    with_projected_vector(request, crate::tiny_skia_renderer::render_projected)
+}
+
+pub(crate) fn with_projected_vector<T>(
+    request: &VectorRenderRequest,
+    render: impl Fn(&Dataset, &VectorRenderRequest) -> Result<T, GdalError>,
+) -> Result<T, GdalError> {
     let source_key = source_cache_key(request)?;
     // Persistent entries are complete target-CRS datasets. Keeping request
     // bounds and pixel-derived simplification out of their identity gives one
@@ -145,7 +152,7 @@ pub(crate) fn render_vector(request: &VectorRenderRequest) -> Result<RenderedIma
         bounds: projection_bounds.map(|bounds| bounds.map(f64::to_bits)),
     };
     if let Some(entry) = take_projection(&projection_key) {
-        let rendered = crate::tiny_skia_renderer::render_projected(entry.dataset(), request);
+        let rendered = render(entry.dataset(), request);
         put_projection(entry);
         tracing::debug!("GDAL projected dataset cache hit");
         return rendered;
@@ -157,7 +164,7 @@ pub(crate) fn render_vector(request: &VectorRenderRequest) -> Result<RenderedIma
             Ok(projected) => {
                 PERSISTENT_PROJECTION_HITS.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(path = %path.display(), "GDAL persistent projection cache hit");
-                let rendered = crate::tiny_skia_renderer::render_projected(&projected, request);
+                let rendered = render(&projected, request);
                 let estimated_bytes = projection_file_size(path, &projected);
                 put_projection(ProjectionCacheEntry {
                     key: projection_key,
@@ -184,7 +191,7 @@ pub(crate) fn render_vector(request: &VectorRenderRequest) -> Result<RenderedIma
         simplify_tolerance,
         persistent_path.as_deref(),
     )?;
-    let rendered = crate::tiny_skia_renderer::render_projected(&projected, request);
+    let rendered = render(&projected, request);
     let estimated_bytes = persistent_path.as_deref().map_or_else(
         || {
             estimate_projection_bytes(

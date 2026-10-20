@@ -206,6 +206,14 @@ pub struct RasterizedLabel {
     pub rgba: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedLabel {
+    /// Top-left position in the buffered render target; it may be negative.
+    pub x: i32,
+    pub y: i32,
+    pub image: RasterizedLabel,
+}
+
 pub fn rasterize_text_label(
     text: &str,
     style: &VectorTextStyle,
@@ -429,6 +437,19 @@ impl GdalEngine {
             ));
         }
         ffi::render_vector(request)
+    }
+
+    pub fn layout_vector_labels(
+        &self,
+        request: &VectorRenderRequest,
+    ) -> Result<Vec<PlacedLabel>, GdalError> {
+        request.bbox.validate()?;
+        if request.width == 0 || request.height == 0 {
+            return Err(GdalError::InvalidRequest(
+                "image width and height must be greater than zero".into(),
+            ));
+        }
+        ffi::with_projected_vector(request, tiny_skia_renderer::layout_projected_labels)
     }
 
     pub fn preview_vector_features(

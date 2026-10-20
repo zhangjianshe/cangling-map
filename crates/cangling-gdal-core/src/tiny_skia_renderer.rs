@@ -20,8 +20,8 @@ use tiny_skia::{
 };
 
 use crate::{
-    GdalError, ImageFormat, RasterizedLabel, RenderedImage, VectorComparisonOperator, VectorFilter,
-    VectorLiteral, VectorRenderRequest, VectorTextStyle,
+    GdalError, ImageFormat, PlacedLabel, RasterizedLabel, RenderedImage, VectorComparisonOperator,
+    VectorFilter, VectorLiteral, VectorRenderRequest, VectorTextStyle,
 };
 
 pub(crate) fn render_projected(
@@ -325,6 +325,7 @@ impl LabelBounds {
     }
 }
 
+#[derive(Clone)]
 struct LabelCandidate {
     key: (u64, u64, String),
     path: Path,
@@ -343,6 +344,18 @@ fn render_labels(
     request: &VectorRenderRequest,
     pixel_transform: &PixelTransform,
     stats: &mut RenderStats,
+) -> Result<(), GdalError> {
+    visit_labels(layer, request, pixel_transform, stats, |candidate| {
+        draw_label_candidate(pixmap, candidate, Transform::identity());
+    })
+}
+
+fn visit_labels(
+    layer: &mut impl LayerAccess,
+    request: &VectorRenderRequest,
+    pixel_transform: &PixelTransform,
+    stats: &mut RenderStats,
+    mut accept: impl FnMut(&LabelCandidate),
 ) -> Result<(), GdalError> {
     let mut candidates = Vec::new();
     for rule in request.rules.iter().filter(|rule| rule.text.is_some()) {
@@ -415,66 +428,13 @@ fn render_labels(
         }
         prior_bounds.push(candidate.bounds);
         prior_repeats.push((candidate.key.2.clone(), candidate.anchor));
-        if candidate.halo_radius > 0.0 {
-            let mut halo = paint(candidate.halo);
-            halo.anti_alias = true;
-            pixmap.stroke_path(
-                &candidate.path,
-                &halo,
-                &Stroke {
-                    width: candidate.halo_radius * 2.0,
-                    ..Stroke::default()
-                },
-                Transform::identity(),
-                None,
-            );
-        }
-        if candidate.bold {
-            let mut bold = paint(candidate.fill);
-            bold.anti_alias = true;
-            pixmap.stroke_path(
-                &candidate.path,
-                &bold,
-                &Stroke {
-                    width: 0.9,
-                    ..Stroke::default()
-                },
-                Transform::identity(),
-                None,
-            );
-        }
-        let mut fill = paint(candidate.fill);
-        fill.anti_alias = true;
-        pixmap.fill_path(
-            &candidate.path,
-            &fill,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
+        accept(&candidate);
         stats.labels += 1;
     }
     Ok(())
 }
 
-pub(crate) fn rasterize_text_label(
-    text: &str,
-    style: &VectorTextStyle,
-) -> Result<RasterizedLabel, GdalError> {
-    let Some(candidate) = shape_label(text, (0.0, 0.0), (0.0, 0.0), style)? else {
-        return Err(GdalError::InvalidRequest(
-            "label has no drawable glyphs".into(),
-        ));
-    };
-    let width = (candidate.bounds.right - candidate.bounds.left)
-        .ceil()
-        .max(1.0) as u32;
-    let height = (candidate.bounds.bottom - candidate.bounds.top)
-        .ceil()
-        .max(1.0) as u32;
-    let mut pixmap = Pixmap::new(width, height)
-        .ok_or_else(|| GdalError::InvalidRequest("invalid label dimensions".into()))?;
-    let transform = Transform::from_translate(-candidate.bounds.left, -candidate.bounds.top);
+fn draw_label_candidate(pixmap: &mut Pixmap, candidate: &LabelCandidate, transform: Transform) {
     if candidate.halo_radius > 0.0 {
         let mut halo = paint(candidate.halo);
         halo.anti_alias = true;
@@ -506,6 +466,97 @@ pub(crate) fn rasterize_text_label(
     let mut fill = paint(candidate.fill);
     fill.anti_alias = true;
     pixmap.fill_path(&candidate.path, &fill, FillRule::Winding, transform, None);
+}
+
+pub(crate) fn layout_projected_labels(
+    dataset: &Dataset,
+    request: &VectorRenderRequest,
+) -> Result<Vec<PlacedLabel>, GdalError> {
+    let mut layer = dataset.layer(0)?;
+    let pixel_transform = PixelTransform::new(request);
+    let context_pixels = request
+        .rules
+        .iter()
+        .filter_map(|rule| rule.text.as_ref())
+        .map(|text| {
+            text.repeat_distance
+                .max(text.spacing + text.font_size * 4.0)
+        })
+        .fold(128.0_f32, f32::max)
+        .ceil()
+        .min(512.0) as u32;
+    let context_x = (request.bbox.max_x - request.bbox.min_x) / f64::from(request.width)
+        * f64::from(context_pixels);
+    let context_y = (request.bbox.max_y - request.bbox.min_y) / f64::from(request.height)
+        * f64::from(context_pixels);
+    layer.set_spatial_filter_rect(
+        request.bbox.min_x - context_x,
+        request.bbox.min_y - context_y,
+        request.bbox.max_x + context_x,
+        request.bbox.max_y + context_y,
+    );
+    let mut stats = RenderStats::default();
+    let mut candidates = Vec::new();
+    visit_labels(
+        &mut layer,
+        request,
+        &pixel_transform,
+        &mut stats,
+        |candidate| candidates.push(candidate.clone()),
+    )?;
+    candidates
+        .into_iter()
+        .map(rasterize_placed_candidate)
+        .collect()
+}
+
+fn rasterize_placed_candidate(candidate: LabelCandidate) -> Result<PlacedLabel, GdalError> {
+    let x = candidate.bounds.left.floor() as i32;
+    let y = candidate.bounds.top.floor() as i32;
+    let width = (candidate.bounds.right.ceil() as i32 - x).max(1) as u32;
+    let height = (candidate.bounds.bottom.ceil() as i32 - y).max(1) as u32;
+    let image = rasterize_candidate(&candidate, x as f32, y as f32, width, height)?;
+    Ok(PlacedLabel { x, y, image })
+}
+
+pub(crate) fn rasterize_text_label(
+    text: &str,
+    style: &VectorTextStyle,
+) -> Result<RasterizedLabel, GdalError> {
+    let Some(candidate) = shape_label(text, (0.0, 0.0), (0.0, 0.0), style)? else {
+        return Err(GdalError::InvalidRequest(
+            "label has no drawable glyphs".into(),
+        ));
+    };
+    let width = (candidate.bounds.right - candidate.bounds.left)
+        .ceil()
+        .max(1.0) as u32;
+    let height = (candidate.bounds.bottom - candidate.bounds.top)
+        .ceil()
+        .max(1.0) as u32;
+    rasterize_candidate(
+        &candidate,
+        candidate.bounds.left,
+        candidate.bounds.top,
+        width,
+        height,
+    )
+}
+
+fn rasterize_candidate(
+    candidate: &LabelCandidate,
+    left: f32,
+    top: f32,
+    width: u32,
+    height: u32,
+) -> Result<RasterizedLabel, GdalError> {
+    let mut pixmap = Pixmap::new(width, height)
+        .ok_or_else(|| GdalError::InvalidRequest("invalid label dimensions".into()))?;
+    draw_label_candidate(
+        &mut pixmap,
+        candidate,
+        Transform::from_translate(-left, -top),
+    );
     Ok(RasterizedLabel {
         width,
         height,

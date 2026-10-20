@@ -5,7 +5,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
-use cangling_gdal_core::{rasterize_text_label, RasterizedLabel, VectorTextStyle};
+use cangling_gdal_core::{
+    rasterize_text_label, BoundingBox as GdalBoundingBox, DataSource, GdalEngine,
+    ImageFormat as GdalImageFormat, PlacedLabel, RasterizedLabel, VectorRenderRequest,
+    VectorRenderRule, VectorTextStyle,
+};
 use gdal::{
     vector::{Geometry, LayerAccess},
     Dataset,
@@ -976,6 +980,121 @@ fn pack_label_atlas(
     })
 }
 
+fn pack_placed_label_atlas(
+    output_width: u32,
+    output_height: u32,
+    labels: &[PlacedLabel],
+) -> Result<map_gpu::AtlasOverlay> {
+    const ATLAS_WIDTH: u32 = 2048;
+    const GAP: u32 = 2;
+    let mut atlas_positions = Vec::with_capacity(labels.len());
+    let (mut x, mut y, mut row_height) = (GAP, GAP, 0);
+    for label in labels {
+        if x + label.image.width + GAP > ATLAS_WIDTH {
+            x = GAP;
+            y += row_height + GAP;
+            row_height = 0;
+        }
+        atlas_positions.push((x, y));
+        x += label.image.width + GAP;
+        row_height = row_height.max(label.image.height);
+    }
+    let atlas_height = (y + row_height + GAP).max(1);
+    let mut rgba = vec![0; (ATLAS_WIDTH * atlas_height * 4) as usize];
+    let mut vertices = Vec::with_capacity(labels.len() * 4);
+    let mut indices = Vec::with_capacity(labels.len() * 6);
+    for (label, &(atlas_x, atlas_y)) in labels.iter().zip(&atlas_positions) {
+        for row in 0..label.image.height {
+            let source = (row * label.image.width * 4) as usize;
+            let destination = (((atlas_y + row) * ATLAS_WIDTH + atlas_x) * 4) as usize;
+            rgba[destination..destination + (label.image.width * 4) as usize].copy_from_slice(
+                &label.image.rgba[source..source + (label.image.width * 4) as usize],
+            );
+        }
+        let left = label.x as f32;
+        let top = label.y as f32;
+        let right = left + label.image.width as f32;
+        let bottom = top + label.image.height as f32;
+        let positions = [(left, top), (right, top), (right, bottom), (left, bottom)];
+        let u0 = atlas_x as f32 / ATLAS_WIDTH as f32;
+        let v0 = atlas_y as f32 / atlas_height as f32;
+        let u1 = (atlas_x + label.image.width) as f32 / ATLAS_WIDTH as f32;
+        let v1 = (atlas_y + label.image.height) as f32 / atlas_height as f32;
+        let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        let base = vertices.len() as u32;
+        for ((x, y), uv) in positions.into_iter().zip(uvs) {
+            vertices.push(map_gpu::AtlasVertex {
+                position: [
+                    x / output_width as f32 * 2.0 - 1.0,
+                    1.0 - y / output_height as f32 * 2.0,
+                    0.0,
+                    1.0,
+                ],
+                uv,
+                _padding: [0.0; 2],
+                color: [1.0; 4],
+            });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Ok(map_gpu::AtlasOverlay {
+        width: ATLAS_WIDTH,
+        height: atlas_height,
+        rgba,
+        vertices,
+        indices,
+        repeat: false,
+    })
+}
+
+fn real_label_request() -> VectorRenderRequest {
+    VectorRenderRequest {
+        source: DataSource {
+            path: "/opt/cis/core/geoserver/data/china/xian201912.shp".into(),
+            layer: None,
+            encoding: Some("GB2312".into()),
+        },
+        target_crs: "EPSG:4326".into(),
+        bbox: GdalBoundingBox {
+            min_x: 109.5,
+            min_y: 30.5,
+            max_x: 117.8,
+            max_y: 37.0,
+        },
+        width: 1024,
+        height: 1024,
+        buffer_pixels: 0,
+        simplify_tolerance: None,
+        format: GdalImageFormat::Png,
+        rules: vec![VectorRenderRule {
+            where_clause: None,
+            filter: None,
+            fill: None,
+            fill_field: None,
+            fill_image: None,
+            stroke: None,
+            stroke_field: None,
+            stroke_width: 0.0,
+            stroke_dasharray: Vec::new(),
+            text: Some(VectorTextStyle {
+                field: "name".into(),
+                font_family: "IPAex Gothic".into(),
+                font_size: 18.0,
+                font_italic: false,
+                font_bold: true,
+                fill: [32, 53, 42, 255],
+                halo: [255, 255, 255, 230],
+                halo_radius: 2.0,
+                spacing: 6.0,
+                min_area: 100.0,
+                repeat_distance: 180.0,
+                repeat_count: 3,
+            }),
+        }],
+        background: [0, 0, 0, 0],
+    }
+}
+
 fn main() -> Result<()> {
     let gpu = pollster::block_on(GpuRenderer::new())?;
     let iterations = std::env::var("GPU_BENCH_ITERATIONS")
@@ -1018,6 +1137,49 @@ fn main() -> Result<()> {
     let production_gpu = ProductionGpuRenderer::new(&map_gpu::RendererOptions {
         adapter_name: std::env::var("GPU_BENCH_ADAPTER").ok(),
     })?;
+    if Path::new("/opt/cis/core/geoserver/data/china/xian201912.shp").is_file() {
+        let request = real_label_request();
+        let label_started = Instant::now();
+        let labels = GdalEngine.layout_vector_labels(&request)?;
+        let label_layout_ms = label_started.elapsed().as_secs_f64() * 1000.0;
+        let atlas = pack_placed_label_atlas(request.width, request.height, &labels)?;
+        let scene =
+            production_gpu.prepare_with_atlas(request.width, request.height, &[], Some(&atlas))?;
+        let gpu_time = measure(|| Ok(production_gpu.render_rgba(&scene)?), iterations)?;
+        let gpu_pixels = production_gpu.render_rgba(&scene)?;
+        let cpu_image = GdalEngine.render_vector(&request)?;
+        let cpu_pixels = image::load_from_memory(&cpu_image.bytes)?
+            .to_rgba8()
+            .into_raw();
+        let diff = image_diff(&cpu_pixels, &gpu_pixels);
+        println!(
+            "real_label_layout labels={} layout_ms={:.3} gpu_ms={:.3} mae={:.3} pixels_over_16_pct={:.3}",
+            labels.len(),
+            label_layout_ms,
+            gpu_time.as_secs_f64() * 1000.0,
+            diff.mean_absolute_error,
+            diff.pixels_over_16_percent,
+        );
+        if std::env::var_os("GPU_BENCH_ASSERT_CORRECTNESS").is_some()
+            && (diff.mean_absolute_error > 2.0 || diff.pixels_over_16_percent > 2.0)
+        {
+            anyhow::bail!(
+                "real labels exceeded GPU correctness limits: MAE {:.3}, pixels >16 {:.3}%",
+                diff.mean_absolute_error,
+                diff.pixels_over_16_percent
+            );
+        }
+        if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
+            save_comparison(
+                Path::new(&output),
+                "real-label-layout",
+                request.width,
+                request.height,
+                &cpu_pixels,
+                &gpu_pixels,
+            )?;
+        }
+    }
     let label_atlas = sample_label_atlas(1024, 512)?;
     let pattern_fill = sample_pattern_fill(1024, 512);
     let pattern_scene =
