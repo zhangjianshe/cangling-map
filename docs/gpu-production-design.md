@@ -48,3 +48,11 @@ source fingerprint + target CRS + style revision + zoom band + spatial chunk
 
 只有当同一套真实请求在 CPU/GPU 输出差异、并发 P95、显存上限、设备丢失恢复和长时间运行
 测试中全部达标，GPU 后端才允许作为默认渲染器。
+
+## 服务降级边界
+
+`map-render::FallbackVectorRasterizer` 作为 WMS、WMTS 与预览共用的后端包装器。GPU 对当前
+规则返回 `Unsupported` 时只回退该请求；初始化失败或设备丢失返回 `Unavailable` 时触发
+进程内熔断，后续请求不再反复访问故障设备。包装器记录 primary 尝试/成功/失败、fallback
+请求及熔断状态，并允许运维恢复设备后显式重新启用。GPU 后端接入服务后这些计数需并入现有
+指标页面。

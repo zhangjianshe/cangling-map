@@ -11,7 +11,7 @@ image.workspace = true
 map-core = { path = "../map-core" }
 map-style = { path = "../map-style" }
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true
-
