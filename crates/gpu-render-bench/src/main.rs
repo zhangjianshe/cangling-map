@@ -32,6 +32,18 @@ struct GpuRenderer {
     backend: String,
 }
 
+struct PreparedGpuScene {
+    bind_group: wgpu::BindGroup,
+    vertex_count: u32,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    output: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    unpadded_bytes_per_row: u32,
+    padded_bytes_per_row: u32,
+}
+
 impl GpuRenderer {
     async fn new() -> Result<Self> {
         let instance = wgpu::Instance::default();
@@ -127,7 +139,7 @@ impl GpuRenderer {
         })
     }
 
-    fn render(&self, width: u32, height: u32, rectangles: &[Rectangle]) -> Result<Vec<u8>> {
+    fn prepare(&self, width: u32, height: u32, rectangles: &[Rectangle]) -> PreparedGpuScene {
         let vertices = rectangles
             .iter()
             .flat_map(|rectangle| rectangle_vertices(width, height, *rectangle))
@@ -170,12 +182,31 @@ impl GpuRenderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        PreparedGpuScene {
+            bind_group,
+            vertex_count: vertices.len() as u32,
+            texture,
+            view,
+            output,
+            width,
+            height,
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+        }
+    }
+
+    fn render(&self, width: u32, height: u32, rectangles: &[Rectangle]) -> Result<Vec<u8>> {
+        let scene = self.prepare(width, height, rectangles);
+        self.render_prepared(&scene)
+    }
+
+    fn render_prepared(&self, scene: &PreparedGpuScene) -> Result<Vec<u8>> {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("offscreen polygon pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &scene.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -187,23 +218,23 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.set_bind_group(0, &scene.bind_group, &[]);
+            pass.draw(0..scene.vertex_count, 0..1);
         }
         encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
+            scene.texture.as_image_copy(),
             wgpu::ImageCopyBuffer {
-                buffer: &output,
+                buffer: &scene.output,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(scene.padded_bytes_per_row),
+                    rows_per_image: Some(scene.height),
                 },
             },
-            texture.size(),
+            scene.texture.size(),
         );
         self.queue.submit(Some(encoder.finish()));
-        let slice = output.slice(..);
+        let slice = scene.output.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -213,12 +244,12 @@ impl GpuRenderer {
             .recv()
             .context("GPU readback callback was lost")??;
         let mapped = slice.get_mapped_range();
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for row in mapped.chunks_exact(padded_bytes_per_row as usize) {
-            pixels.extend_from_slice(&row[..unpadded_bytes_per_row as usize]);
+        let mut pixels = Vec::with_capacity((scene.width * scene.height * 4) as usize);
+        for row in mapped.chunks_exact(scene.padded_bytes_per_row as usize) {
+            pixels.extend_from_slice(&row[..scene.unpadded_bytes_per_row as usize]);
         }
         drop(mapped);
-        output.unmap();
+        scene.output.unmap();
         Ok(pixels)
     }
 }
@@ -313,18 +344,32 @@ fn main() -> Result<()> {
         "adapter={} backend={} iterations={iterations}",
         gpu.adapter_name, gpu.backend
     );
-    println!("size,shapes,cpu_ms,gpu_total_ms,speedup");
+    println!("size,shapes,cpu_ms,gpu_cold_ms,gpu_resident_ms,resident_speedup");
     for (width, height, shapes) in [(256, 256, 250), (1024, 1024, 2_000), (2048, 2048, 8_000)] {
         let rectangles = scene(width, height, shapes);
+        let resident_scene = gpu.prepare(width, height, &rectangles);
         let cpu = measure(|| cpu_render(width, height, &rectangles), iterations)?;
-        let gpu_time = measure(|| gpu.render(width, height, &rectangles), iterations)?;
+        let gpu_cold = measure(|| gpu.render(width, height, &rectangles), iterations)?;
+        let gpu_resident = measure(|| gpu.render_prepared(&resident_scene), iterations)?;
         println!(
-            "{}x{height},{shapes},{:.3},{:.3},{:.2}",
+            "{}x{height},{shapes},{:.3},{:.3},{:.3},{:.2}",
             width,
             cpu.as_secs_f64() * 1000.0,
-            gpu_time.as_secs_f64() * 1000.0,
-            cpu.as_secs_f64() / gpu_time.as_secs_f64(),
+            gpu_cold.as_secs_f64() * 1000.0,
+            gpu_resident.as_secs_f64() * 1000.0,
+            cpu.as_secs_f64() / gpu_resident.as_secs_f64(),
         );
     }
+
+    let metatile_width = 1024;
+    let metatile_height = 1024;
+    let metatile_rectangles = scene(metatile_width, metatile_height, 4_000);
+    let metatile_scene = gpu.prepare(metatile_width, metatile_height, &metatile_rectangles);
+    let metatile = measure(|| gpu.render_prepared(&metatile_scene), iterations)?;
+    println!(
+        "metatile=4x4 total_ms={:.3} amortized_256_tile_ms={:.3}",
+        metatile.as_secs_f64() * 1000.0,
+        metatile.as_secs_f64() * 1000.0 / 16.0,
+    );
     Ok(())
 }
