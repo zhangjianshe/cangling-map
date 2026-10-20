@@ -11,7 +11,10 @@ use gdal::{
     Dataset,
 };
 use map_gpu::{MeshChunk as IndexedMeshChunk, Renderer as ProductionGpuRenderer};
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, StrokeDash, Transform};
+use tiny_skia::{
+    Color, FilterQuality, IntSize, Paint, PathBuilder, Pattern, Pixmap, SpreadMode, StrokeDash,
+    Transform,
+};
 use wgpu::util::DeviceExt;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -811,6 +814,99 @@ fn sample_label_atlas(width: u32, height: u32) -> Result<map_gpu::AtlasOverlay> 
     pack_label_atlas(width, height, &labels)
 }
 
+fn sample_pattern_fill(width: u32, height: u32) -> map_gpu::AtlasOverlay {
+    const PATTERN_SIZE: u32 = 16;
+    let rgba = checker_pattern_rgba(PATTERN_SIZE);
+    let points = sample_pattern_polygon(width, height);
+    let flat = points
+        .iter()
+        .flat_map(|point| [point.0 as f64, point.1 as f64])
+        .collect::<Vec<_>>();
+    let indices = earcutr::earcut(&flat, &[], 2).expect("sample polygon triangulates");
+    let vertices = points
+        .into_iter()
+        .map(|(x, y)| map_gpu::AtlasVertex {
+            position: [
+                x / width as f32 * 2.0 - 1.0,
+                1.0 - y / height as f32 * 2.0,
+                0.0,
+                1.0,
+            ],
+            uv: [x / PATTERN_SIZE as f32, y / PATTERN_SIZE as f32],
+            _padding: [0.0; 2],
+            color: [1.0; 4],
+        })
+        .collect();
+    map_gpu::AtlasOverlay {
+        width: PATTERN_SIZE,
+        height: PATTERN_SIZE,
+        rgba,
+        vertices,
+        indices: indices.into_iter().map(|index| index as u32).collect(),
+        repeat: true,
+    }
+}
+
+fn checker_pattern_rgba(size: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let dark = ((x / 4) + (y / 4)) % 2 == 0;
+            rgba.extend(if dark {
+                [206, 224, 214, 255]
+            } else {
+                [238, 244, 240, 255]
+            });
+        }
+    }
+    rgba
+}
+
+fn sample_pattern_polygon(width: u32, height: u32) -> [(f32, f32); 6] {
+    [
+        (24.0, 24.0),
+        (width as f32 - 24.0, 24.0),
+        (width as f32 - 150.0, height as f32 / 2.0),
+        (width as f32 - 24.0, height as f32 - 24.0),
+        (24.0, height as f32 - 24.0),
+        (150.0, height as f32 / 2.0),
+    ]
+}
+
+fn cpu_render_pattern(width: u32, height: u32) -> Result<Vec<u8>> {
+    const PATTERN_SIZE: u32 = 16;
+    let image = Pixmap::from_vec(
+        checker_pattern_rgba(PATTERN_SIZE),
+        IntSize::from_wh(PATTERN_SIZE, PATTERN_SIZE).context("invalid pattern size")?,
+    )
+    .context("invalid pattern pixels")?;
+    let mut pixmap = Pixmap::new(width, height).context("invalid image dimensions")?;
+    let points = sample_pattern_polygon(width, height);
+    let mut builder = PathBuilder::new();
+    builder.move_to(points[0].0, points[0].1);
+    for &(x, y) in &points[1..] {
+        builder.line_to(x, y);
+    }
+    builder.close();
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    paint.shader = Pattern::new(
+        image.as_ref(),
+        SpreadMode::Repeat,
+        FilterQuality::Bilinear,
+        1.0,
+        Transform::identity(),
+    );
+    pixmap.fill_path(
+        &builder.finish().context("invalid sample pattern polygon")?,
+        &paint,
+        tiny_skia::FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    Ok(pixmap.data().to_vec())
+}
+
 fn pack_label_atlas(
     output_width: u32,
     output_height: u32,
@@ -876,6 +972,7 @@ fn pack_label_atlas(
         rgba,
         vertices,
         indices,
+        repeat: false,
     })
 }
 
@@ -922,15 +1019,39 @@ fn main() -> Result<()> {
         adapter_name: std::env::var("GPU_BENCH_ADAPTER").ok(),
     })?;
     let label_atlas = sample_label_atlas(1024, 512)?;
-    let label_scene = production_gpu.prepare_with_atlas(1024, 512, &[], Some(&label_atlas))?;
+    let pattern_fill = sample_pattern_fill(1024, 512);
+    let pattern_scene =
+        production_gpu.prepare_with_atlases(1024, 512, &[], std::slice::from_ref(&pattern_fill))?;
+    let pattern_gpu = production_gpu.render_rgba(&pattern_scene)?;
+    let pattern_cpu = cpu_render_pattern(1024, 512)?;
+    let pattern_diff = image_diff(&pattern_cpu, &pattern_gpu);
+    if std::env::var_os("GPU_BENCH_ASSERT_CORRECTNESS").is_some()
+        && (pattern_diff.mean_absolute_error > 3.5 || pattern_diff.pixels_over_16_percent > 4.0)
+    {
+        anyhow::bail!(
+            "pattern fill exceeded GPU correctness limits: MAE {:.3}, pixels >16 {:.3}%",
+            pattern_diff.mean_absolute_error,
+            pattern_diff.pixels_over_16_percent
+        );
+    }
+    let label_scene = production_gpu.prepare_with_atlases(
+        1024,
+        512,
+        &[],
+        &[pattern_fill, label_atlas.clone()],
+    )?;
     let label_time = measure(|| Ok(production_gpu.render_rgba(&label_scene)?), iterations)?;
     let label_pixels = production_gpu.render_rgba(&label_scene)?;
     println!(
-        "label_atlas=12 labels atlas={}x{} resident_ms={:.3} vram_mb={:.2}",
+        "pattern_and_label_atlas=1 pattern+12 labels label_atlas={}x{} resident_ms={:.3} vram_mb={:.2}",
         label_atlas.width,
         label_atlas.height,
         label_time.as_secs_f64() * 1000.0,
         label_scene.stats().estimated_gpu_bytes as f64 / (1024.0 * 1024.0),
+    );
+    println!(
+        "pattern_fill_diff mean_abs_error={:.3} pixels_over_16_pct={:.3}",
+        pattern_diff.mean_absolute_error, pattern_diff.pixels_over_16_percent
     );
     if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
         std::fs::create_dir_all(&output)?;
@@ -940,6 +1061,14 @@ fn main() -> Result<()> {
             1024,
             512,
             image::ColorType::Rgba8,
+        )?;
+        save_comparison(
+            Path::new(&output),
+            "pattern-fill",
+            1024,
+            512,
+            &pattern_cpu,
+            &pattern_gpu,
         )?;
     }
     let real_iterations = iterations.min(5);

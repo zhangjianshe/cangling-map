@@ -39,6 +39,10 @@ pub struct AtlasOverlay {
     pub rgba: Vec<u8>,
     pub vertices: Vec<AtlasVertex>,
     pub indices: Vec<u32>,
+    /// Repeats the complete texture when UV coordinates leave 0..1. This is
+    /// intended for one-pattern-per-overlay polygon fills. Label atlases use
+    /// clamped sampling.
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -137,7 +141,7 @@ pub struct PreparedScene {
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
     stats: PreparedSceneStats,
-    atlas: Option<PreparedAtlas>,
+    atlases: Vec<PreparedAtlas>,
 }
 
 /// Byte-budgeted LRU for prepared spatial chunks, label atlases and image
@@ -440,7 +444,7 @@ impl Renderer {
         height: u32,
         chunks: &[MeshChunk],
     ) -> Result<PreparedScene, GpuError> {
-        self.prepare_with_atlas(width, height, chunks, None)
+        self.prepare_with_atlases(width, height, chunks, &[])
     }
 
     pub fn prepare_with_atlas(
@@ -449,6 +453,21 @@ impl Renderer {
         height: u32,
         chunks: &[MeshChunk],
         atlas: Option<&AtlasOverlay>,
+    ) -> Result<PreparedScene, GpuError> {
+        match atlas {
+            Some(atlas) => {
+                self.prepare_with_atlases(width, height, chunks, std::slice::from_ref(atlas))
+            }
+            None => self.prepare_with_atlases(width, height, chunks, &[]),
+        }
+    }
+
+    pub fn prepare_with_atlases(
+        &self,
+        width: u32,
+        height: u32,
+        chunks: &[MeshChunk],
+        atlases: &[AtlasOverlay],
     ) -> Result<PreparedScene, GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::InvalidDimensions);
@@ -533,8 +552,11 @@ impl Renderer {
         });
         stats.estimated_gpu_bytes +=
             (u64::from(width) * u64::from(height) * 4 * (2 + u64::from(SAMPLE_COUNT))) as usize;
-        let atlas = atlas.map(|atlas| self.prepare_atlas(atlas)).transpose()?;
-        if let Some(atlas) = atlas.as_ref() {
+        let atlases = atlases
+            .iter()
+            .map(|atlas| self.prepare_atlas(atlas))
+            .collect::<Result<Vec<_>, _>>()?;
+        for atlas in &atlases {
             stats.estimated_gpu_bytes += atlas.estimated_gpu_bytes;
         }
         Ok(PreparedScene {
@@ -549,7 +571,7 @@ impl Renderer {
             unpadded_bytes_per_row,
             padded_bytes_per_row,
             stats,
-            atlas,
+            atlases,
         })
     }
 
@@ -598,6 +620,16 @@ impl Renderer {
             label: Some("cangling-map atlas sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: if atlas.repeat {
+                wgpu::AddressMode::Repeat
+            } else {
+                wgpu::AddressMode::ClampToEdge
+            },
+            address_mode_v: if atlas.repeat {
+                wgpu::AddressMode::Repeat
+            } else {
+                wgpu::AddressMode::ClampToEdge
+            },
             ..Default::default()
         });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -653,7 +685,7 @@ impl Renderer {
                 pass.set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..batch.index_count, 0, 0..1);
             }
-            if let Some(atlas) = scene.atlas.as_ref() {
+            for atlas in &scene.atlases {
                 pass.set_pipeline(&self.atlas_pipeline);
                 pass.set_bind_group(0, &atlas.bind_group, &[]);
                 pass.set_index_buffer(atlas.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
