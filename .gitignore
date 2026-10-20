@@ -8,6 +8,7 @@ catalog.db-*
 catalog.db.before-*
 vector-projection-cache*/
 wmts-cache/
+cache/
 map-settings.json
 
 # Administrative source datasets are deployment assets, not Git source files.

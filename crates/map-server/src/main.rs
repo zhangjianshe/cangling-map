@@ -286,7 +286,8 @@ impl WmtsCache {
         {
             "filesystem" => Ok(Self::Filesystem {
                 root: std::env::var("WMTS_CACHE_PATH")
-                    .unwrap_or_else(|_| "wmts-cache".into())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| map_cache_root().join("wmts"))
                     .into(),
             }),
             "cangling-tile" => {
@@ -365,6 +366,13 @@ impl WmtsCache {
             },
         }
     }
+}
+
+fn map_cache_root() -> std::path::PathBuf {
+    std::env::var_os("MAP_CACHE_ROOT")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("cache"))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -783,29 +791,36 @@ async fn list_host_files(headers: HeaderMap, Json(query): Json<HostFilesQuery>) 
     .into_response()
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("../web/index.html"))
+fn management_page(template: &str) -> Html<String> {
+    Html(
+        template
+            .replace("{{MAP_VERSION}}", env!("CARGO_PKG_VERSION"))
+            .replace("{{MAP_BUILD_DATE}}", env!("MAP_BUILD_DATE")),
+    )
 }
-async fn published_page() -> Html<&'static str> {
-    Html(include_str!("../web/published.html"))
+async fn index() -> Html<String> {
+    management_page(include_str!("../web/index.html"))
 }
-async fn published_preview_page() -> Html<&'static str> {
-    Html(include_str!("../web/preview.html"))
+async fn published_page() -> Html<String> {
+    management_page(include_str!("../web/published.html"))
 }
-async fn layer_groups_page() -> Html<&'static str> {
-    Html(include_str!("../web/groups.html"))
+async fn published_preview_page() -> Html<String> {
+    management_page(include_str!("../web/preview.html"))
 }
-async fn style_management_page() -> Html<&'static str> {
-    Html(include_str!("../web/style-editor.html"))
+async fn layer_groups_page() -> Html<String> {
+    management_page(include_str!("../web/groups.html"))
 }
-async fn style_assets_page() -> Html<&'static str> {
-    Html(include_str!("../web/style-assets.html"))
+async fn style_management_page() -> Html<String> {
+    management_page(include_str!("../web/style-editor.html"))
 }
-async fn metrics_page() -> Html<&'static str> {
-    Html(include_str!("../web/metrics.html"))
+async fn style_assets_page() -> Html<String> {
+    management_page(include_str!("../web/style-assets.html"))
 }
-async fn cache_settings_page() -> Html<&'static str> {
-    Html(include_str!("../web/cache-settings.html"))
+async fn metrics_page() -> Html<String> {
+    management_page(include_str!("../web/metrics.html"))
+}
+async fn cache_settings_page() -> Html<String> {
+    management_page(include_str!("../web/cache-settings.html"))
 }
 
 async fn get_cache_service_settings(State(state): State<AppState>) -> Response {

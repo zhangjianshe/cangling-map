@@ -1,0 +1,41 @@
+services:
+  cangling-map:
+    image: soft.cangling.cn:22002/cangling/cangling-map:latest
+    container_name: cangling-map
+    restart: unless-stopped
+    depends_on:
+      cangling-tile:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      MAP_SERVER_ADDRESS: 0.0.0.0:3000
+      CATALOG_DATABASE_URL: sqlite:///data/catalog.db?mode=rwc
+      WMTS_CACHE_BACKEND: cangling-tile
+      CANGLING_TILE_URL: http://cangling-tile:7601
+      CANGLING_TILE_TOKEN: ${CANGLING_TILE_AUTH_TOKEN:-change-me-before-production}
+      MAP_CACHE_ROOT: /cache
+      RUST_LOG: map_server=info,cangling_gdal_core=info,tower_http=info
+    volumes:
+      - cangling-map-data:/data
+      - cangling-map-cache:/cache
+
+  cangling-tile:
+    image: harbor.cangling.cn:22002/cangling/cangling-tile:latest
+    container_name: cangling-tile
+    restart: unless-stopped
+    ports:
+      - "7601:7601"
+    environment:
+      CANGLING_TILE_ADDR: 0.0.0.0:7601
+      CANGLING_TILE_AUTH_TOKEN: ${CANGLING_TILE_AUTH_TOKEN:-change-me-before-production}
+      CANGLING_TILE_ADMIN_PASSWORD: ${CANGLING_TILE_ADMIN_PASSWORD:--Cangling@zky}
+    volumes:
+      - cangling-tile-data:/app/tiledata
+      - cangling-tile-config:/app/config
+
+volumes:
+  cangling-map-data:
+  cangling-map-cache:
+  cangling-tile-data:
+  cangling-tile-config:

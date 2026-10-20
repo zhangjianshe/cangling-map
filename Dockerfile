@@ -23,17 +23,16 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 FROM ${GDAL_BASE_IMAGE}
 RUN groupadd --system --gid 10001 cangling \
     && useradd --system --uid 10001 --gid cangling --home-dir /data --create-home cangling \
-    && mkdir -p /data/wmts-cache /data/vector-projection-cache /data/style-assets \
-    && chown -R cangling:cangling /data
+    && mkdir -p /data/style-assets /cache/wmts /cache/vector-projection \
+    && chown -R cangling:cangling /data /cache
 COPY --from=builder /usr/local/bin/cangling-map /usr/local/bin/cangling-map
 USER cangling
 WORKDIR /data
 ENV MAP_SERVER_ADDRESS=0.0.0.0:3000 \
     CATALOG_DATABASE_URL=sqlite:///data/catalog.db?mode=rwc \
     WMTS_CACHE_BACKEND=filesystem \
-    WMTS_CACHE_PATH=/data/wmts-cache \
-    VECTOR_PROJECTION_CACHE_PATH=/data/vector-projection-cache \
+    MAP_CACHE_ROOT=/cache \
     STYLE_ASSET_ROOT=/data/style-assets
-VOLUME ["/data"]
+VOLUME ["/data", "/cache"]
 EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/cangling-map"]

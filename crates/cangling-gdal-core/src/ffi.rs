@@ -319,7 +319,13 @@ fn project_vector_source(
 fn persistent_projection_path(key: &ProjectionCacheKey) -> Result<Option<PathBuf>, GdalError> {
     let cache_path = std::env::var_os("VECTOR_PROJECTION_CACHE_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("vector-projection-cache"));
+        .unwrap_or_else(|| {
+            std::env::var_os("MAP_CACHE_ROOT")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("cache"))
+                .join("vector-projection")
+        });
     if cache_path.as_os_str().is_empty() {
         return Ok(None);
     }

@@ -1,0 +1,20 @@
+services:
+  cangling-map:
+    image: soft.cangling.cn:22002/cangling/cangling-map:latest
+    container_name: cangling-map
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      MAP_SERVER_ADDRESS: 0.0.0.0:3000
+      CATALOG_DATABASE_URL: sqlite:///data/catalog.db?mode=rwc
+      WMTS_CACHE_BACKEND: filesystem
+      MAP_CACHE_ROOT: /cache
+      RUST_LOG: map_server=info,cangling_gdal_core=info,tower_http=info
+    volumes:
+      - cangling-map-data:/data
+      - cangling-map-cache:/cache
+
+volumes:
+  cangling-map-data:
+  cangling-map-cache:
