@@ -9,7 +9,8 @@ use gdal::{
     vector::{Geometry, LayerAccess},
     Dataset,
 };
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Transform};
+use map_gpu::{MeshChunk as IndexedMeshChunk, Renderer as ProductionGpuRenderer};
+use tiny_skia::{Color, Paint, PathBuilder, Pixmap, StrokeDash, Transform};
 use wgpu::util::DeviceExt;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -332,10 +333,16 @@ fn cpu_render(width: u32, height: u32, rectangles: &[Rectangle]) -> Result<Vec<u
 
 #[derive(Default)]
 struct RealGeometryScene {
-    polygons: Vec<Vec<Vec<(f32, f32)>>>,
-    vertices: Vec<Vertex>,
+    polygons: Vec<RealPolygon>,
+    mesh_chunks: Vec<IndexedMeshChunk>,
     features: usize,
     rings: usize,
+    dashed_boundaries: bool,
+}
+
+struct RealPolygon {
+    rings: Vec<Vec<(f32, f32)>>,
+    color: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -360,11 +367,15 @@ fn load_real_scene(
     width: u32,
     height: u32,
     bounds: WorldBounds,
+    dashed_boundaries: bool,
 ) -> Result<RealGeometryScene> {
     let dataset = Dataset::open(path).with_context(|| format!("failed to open {path}"))?;
     let mut layer = dataset.layer(0)?;
     layer.set_spatial_filter_rect(bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
-    let mut scene = RealGeometryScene::default();
+    let mut scene = RealGeometryScene {
+        dashed_boundaries,
+        ..Default::default()
+    };
     for (feature_index, feature) in layer.features().enumerate() {
         let Some(geometry) = feature.geometry() else {
             continue;
@@ -451,29 +462,195 @@ fn append_real_polygon(
         .chunks_exact(2)
         .map(|point| [point[0] as f32, point[1] as f32])
         .collect::<Vec<_>>();
-    for index in indices {
-        let point = points[index];
-        let x = point[0] / width as f32 * 2.0 - 1.0;
-        let y = 1.0 - point[1] / height as f32 * 2.0;
-        scene.vertices.push(Vertex {
+    let mut mesh_vertices = points
+        .iter()
+        .map(|point| {
+            let x = point[0] / width as f32 * 2.0 - 1.0;
+            let y = 1.0 - point[1] / height as f32 * 2.0;
+            map_gpu::Vertex {
+                position: [x, y, 0.0, 1.0],
+                color,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut mesh_indices = indices;
+    for ring in &rings {
+        append_stroke_mesh(
+            ring,
+            width,
+            height,
+            [0.12, 0.24, 0.20, 0.85],
+            1.0,
+            scene.dashed_boundaries.then_some(&[6.0, 4.0]),
+            &mut mesh_vertices,
+            &mut mesh_indices,
+        );
+    }
+    append_indexed_polygon(&mut scene.mesh_chunks, mesh_vertices, mesh_indices);
+    scene.rings += rings.len();
+    scene.polygons.push(RealPolygon { rings, color });
+    Ok(())
+}
+
+fn append_stroke_mesh(
+    points: &[(f32, f32)],
+    width: u32,
+    height: u32,
+    color: [f32; 4],
+    line_width: f32,
+    dash_pattern: Option<&[f32]>,
+    vertices: &mut Vec<map_gpu::Vertex>,
+    indices: &mut Vec<usize>,
+) {
+    let half_width = line_width / 2.0;
+    let mut dash_state = dash_pattern.map(|pattern| DashState::new(pattern));
+    for (&start, &end) in points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .take(points.len())
+    {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let length = dx.hypot(dy);
+        if length <= f32::EPSILON {
+            continue;
+        }
+        if let Some(state) = dash_state.as_mut() {
+            let direction = (dx / length, dy / length);
+            let mut travelled = 0.0;
+            while travelled < length {
+                let step = state.remaining.min(length - travelled);
+                if state.paint {
+                    append_stroke_quad(
+                        (
+                            start.0 + direction.0 * travelled,
+                            start.1 + direction.1 * travelled,
+                        ),
+                        (
+                            start.0 + direction.0 * (travelled + step),
+                            start.1 + direction.1 * (travelled + step),
+                        ),
+                        width,
+                        height,
+                        color,
+                        half_width,
+                        vertices,
+                        indices,
+                    );
+                }
+                travelled += step;
+                state.advance(step);
+            }
+            continue;
+        }
+        append_stroke_quad(
+            start, end, width, height, color, half_width, vertices, indices,
+        );
+    }
+}
+
+struct DashState<'a> {
+    pattern: &'a [f32],
+    index: usize,
+    remaining: f32,
+    paint: bool,
+}
+
+impl<'a> DashState<'a> {
+    fn new(pattern: &'a [f32]) -> Self {
+        debug_assert!(!pattern.is_empty());
+        debug_assert!(pattern.iter().all(|length| *length > 0.0));
+        Self {
+            pattern,
+            index: 0,
+            remaining: pattern[0],
+            paint: true,
+        }
+    }
+
+    fn advance(&mut self, distance: f32) {
+        self.remaining -= distance;
+        if self.remaining <= f32::EPSILON {
+            self.index = (self.index + 1) % self.pattern.len();
+            self.remaining = self.pattern[self.index];
+            self.paint = !self.paint;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_stroke_quad(
+    start: (f32, f32),
+    end: (f32, f32),
+    width: u32,
+    height: u32,
+    color: [f32; 4],
+    half_width: f32,
+    vertices: &mut Vec<map_gpu::Vertex>,
+    indices: &mut Vec<usize>,
+) {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let length = dx.hypot(dy);
+    if length <= f32::EPSILON {
+        return;
+    }
+    let normal = (-dy / length * half_width, dx / length * half_width);
+    let corners = [
+        (start.0 + normal.0, start.1 + normal.1),
+        (end.0 + normal.0, end.1 + normal.1),
+        (end.0 - normal.0, end.1 - normal.1),
+        (start.0 - normal.0, start.1 - normal.1),
+    ];
+    let base = vertices.len();
+    vertices.extend(corners.map(|point| {
+        let x = point.0 / width as f32 * 2.0 - 1.0;
+        let y = 1.0 - point.1 / height as f32 * 2.0;
+        map_gpu::Vertex {
             position: [x, y, 0.0, 1.0],
             color,
-        });
+        }
+    }));
+    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn append_indexed_polygon(
+    chunks: &mut Vec<IndexedMeshChunk>,
+    vertices: Vec<map_gpu::Vertex>,
+    indices: Vec<usize>,
+) {
+    const TARGET_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+    let additional_bytes = vertices.len() * std::mem::size_of::<map_gpu::Vertex>()
+        + indices.len() * std::mem::size_of::<u32>();
+    let needs_new_chunk = chunks.last().is_none_or(|chunk| {
+        !chunk.indices.is_empty()
+            && chunk.estimated_gpu_bytes().saturating_add(additional_bytes) > TARGET_CHUNK_BYTES
+    });
+    if needs_new_chunk {
+        chunks.push(IndexedMeshChunk::default());
     }
-    scene.rings += rings.len();
-    scene.polygons.push(rings);
-    Ok(())
+    let chunk = chunks.last_mut().expect("a mesh chunk was inserted");
+    let base = chunk.vertices.len() as u32;
+    chunk.vertices.extend(vertices);
+    chunk
+        .indices
+        .extend(indices.into_iter().map(|index| base + index as u32));
 }
 
 fn cpu_render_real(width: u32, height: u32, scene: &RealGeometryScene) -> Result<Vec<u8>> {
     let mut pixmap = Pixmap::new(width, height).context("invalid image dimensions")?;
     pixmap.fill(Color::TRANSPARENT);
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(48, 118, 84, 199);
-    paint.anti_alias = true;
     for polygon in &scene.polygons {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(
+            (polygon.color[0] * 255.0) as u8,
+            (polygon.color[1] * 255.0) as u8,
+            (polygon.color[2] * 255.0) as u8,
+            (polygon.color[3] * 255.0) as u8,
+        );
+        paint.anti_alias = true;
         let mut builder = PathBuilder::new();
-        for ring in polygon {
+        for ring in &polygon.rings {
             builder.move_to(ring[0].0, ring[0].1);
             for &(x, y) in &ring[1..] {
                 builder.line_to(x, y);
@@ -488,9 +665,81 @@ fn cpu_render_real(width: u32, height: u32, scene: &RealGeometryScene) -> Result
                 Transform::identity(),
                 None,
             );
+            let mut stroke_paint = Paint::default();
+            stroke_paint.set_color_rgba8(31, 61, 51, 217);
+            stroke_paint.anti_alias = true;
+            let stroke_dash = scene
+                .dashed_boundaries
+                .then(|| StrokeDash::new(vec![6.0, 4.0], 0.0))
+                .flatten();
+            pixmap.stroke_path(
+                &path,
+                &stroke_paint,
+                &tiny_skia::Stroke {
+                    width: 1.0,
+                    dash: stroke_dash,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
         }
     }
     Ok(pixmap.data().to_vec())
+}
+
+struct ImageDiff {
+    mean_absolute_error: f64,
+    pixels_over_16_percent: f64,
+}
+
+fn image_diff(left: &[u8], right: &[u8]) -> ImageDiff {
+    assert_eq!(left.len(), right.len());
+    let absolute_sum = left
+        .iter()
+        .zip(right)
+        .map(|(&left, &right)| u64::from(left.abs_diff(right)))
+        .sum::<u64>();
+    let pixels = left.len() / 4;
+    let pixels_over_16 = left
+        .chunks_exact(4)
+        .zip(right.chunks_exact(4))
+        .filter(|(left, right)| {
+            left.iter()
+                .zip(*right)
+                .any(|(&left, &right)| left.abs_diff(right) > 16)
+        })
+        .count();
+    ImageDiff {
+        mean_absolute_error: absolute_sum as f64 / left.len() as f64,
+        pixels_over_16_percent: pixels_over_16 as f64 / pixels as f64 * 100.0,
+    }
+}
+
+fn save_comparison(
+    directory: &Path,
+    name: &str,
+    width: u32,
+    height: u32,
+    cpu: &[u8],
+    gpu: &[u8],
+) -> Result<()> {
+    std::fs::create_dir_all(directory)?;
+    image::save_buffer(
+        directory.join(format!("{name}-cpu.png")),
+        cpu,
+        width,
+        height,
+        image::ColorType::Rgba8,
+    )?;
+    image::save_buffer(
+        directory.join(format!("{name}-gpu.png")),
+        gpu,
+        width,
+        height,
+        image::ColorType::Rgba8,
+    )?;
+    Ok(())
 }
 
 fn scene(width: u32, height: u32, count: usize) -> Vec<Rectangle> {
@@ -564,7 +813,10 @@ fn main() -> Result<()> {
         metatile.as_secs_f64() * 1000.0 / 16.0,
     );
 
-    println!("real_dataset,size,features,rings,triangles,gpu_chunks,prepare_ms,upload_ms,cpu_ms,gpu_resident_ms,speedup,vram_mb");
+    println!("real_dataset,size,features,rings,triangles,gpu_chunks,prepare_ms,upload_ms,cpu_ms,gpu_resident_ms,speedup,vram_mb,mean_abs_error,pixels_over_16_pct");
+    let production_gpu = ProductionGpuRenderer::new(&map_gpu::RendererOptions {
+        adapter_name: std::env::var("GPU_BENCH_ADAPTER").ok(),
+    })?;
     let real_iterations = iterations.min(5);
     let real_cases = [
         (
@@ -578,6 +830,7 @@ fn main() -> Result<()> {
                 max_x: 136.0,
                 max_y: 54.0,
             },
+            false,
         ),
         (
             "county-henan",
@@ -590,6 +843,7 @@ fn main() -> Result<()> {
                 max_x: 117.8,
                 max_y: 37.0,
             },
+            false,
         ),
         (
             "township-henan",
@@ -602,6 +856,7 @@ fn main() -> Result<()> {
                 max_x: 117.8,
                 max_y: 37.0,
             },
+            true,
         ),
         (
             "county-henan-tile",
@@ -614,6 +869,7 @@ fn main() -> Result<()> {
                 max_x: 114.2,
                 max_y: 34.6,
             },
+            false,
         ),
         (
             "township-henan-tile",
@@ -626,39 +882,67 @@ fn main() -> Result<()> {
                 max_x: 114.2,
                 max_y: 34.6,
             },
+            true,
         ),
     ];
-    for (name, path, width, height, bounds) in real_cases {
+    for (name, path, width, height, bounds, dashed_boundaries) in real_cases {
         if !Path::new(path).is_file() {
             eprintln!("skipping missing real dataset: {path}");
             continue;
         }
         let prepare_started = Instant::now();
-        let real_scene = load_real_scene(path, width, height, bounds)?;
+        let real_scene = load_real_scene(path, width, height, bounds, dashed_boundaries)?;
         let prepare_elapsed = prepare_started.elapsed();
         let upload_started = Instant::now();
-        let gpu_scene = gpu.prepare_vertices(width, height, &real_scene.vertices);
+        let gpu_scene = production_gpu.prepare(width, height, &real_scene.mesh_chunks)?;
         let upload_elapsed = upload_started.elapsed();
         let cpu = measure(
             || cpu_render_real(width, height, &real_scene),
             real_iterations,
         )?;
-        let gpu_time = measure(|| gpu.render_prepared(&gpu_scene), real_iterations)?;
-        let triangles = real_scene.vertices.len() / 3;
-        let vram_mb = real_scene.vertices.len() * std::mem::size_of::<Vertex>()
-            + (width * height * 8) as usize;
+        let gpu_time = measure(
+            || Ok(production_gpu.render_rgba(&gpu_scene)?),
+            real_iterations,
+        )?;
+        let cpu_pixels = cpu_render_real(width, height, &real_scene)?;
+        let gpu_pixels = production_gpu.render_rgba(&gpu_scene)?;
+        let diff = image_diff(&cpu_pixels, &gpu_pixels);
+        if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
+            save_comparison(
+                Path::new(&output),
+                name,
+                width,
+                height,
+                &cpu_pixels,
+                &gpu_pixels,
+            )?;
+        }
+        let changed_pixel_limit = if dashed_boundaries { 7.0 } else { 4.0 };
+        if std::env::var_os("GPU_BENCH_ASSERT_CORRECTNESS").is_some()
+            && (diff.mean_absolute_error > 3.5 || diff.pixels_over_16_percent > changed_pixel_limit)
+        {
+            anyhow::bail!(
+                "{name} exceeded GPU correctness limits: MAE {:.3}, pixels >16 {:.3}%",
+                diff.mean_absolute_error,
+                diff.pixels_over_16_percent
+            );
+        }
+        let scene_stats = gpu_scene.stats();
+        let triangles = scene_stats.indices / 3;
         println!(
-            "{name},{}x{height},{},{},{triangles},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2}",
+            "{name},{}x{height},{},{},{triangles},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2},{:.3},{:.3}",
             width,
             real_scene.features,
             real_scene.rings,
-            gpu_scene.batches.len(),
+            scene_stats.chunks,
             prepare_elapsed.as_secs_f64() * 1000.0,
             upload_elapsed.as_secs_f64() * 1000.0,
             cpu.as_secs_f64() * 1000.0,
             gpu_time.as_secs_f64() * 1000.0,
             cpu.as_secs_f64() / gpu_time.as_secs_f64(),
-            vram_mb as f64 / (1024.0 * 1024.0),
+            scene_stats.estimated_gpu_bytes as f64 / (1024.0 * 1024.0),
+            diff.mean_absolute_error,
+            diff.pixels_over_16_percent,
         );
     }
     Ok(())

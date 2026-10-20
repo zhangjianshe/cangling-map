@@ -35,8 +35,8 @@ source fingerprint + target CRS + style revision + zoom band + spatial chunk
 
 ## 分阶段能力
 
-1. 索引面网格与透明混合；
-2. 线段展开、线宽、连接方式与虚线；
+1. 索引面网格、透明混合与 4× MSAA（已完成原型和真实数据回归）；
+2. 线段展开、线宽与虚线（已完成实线及 6/4 虚线；连接方式和实例化待完成）；
 3. 图案 atlas；
 4. CPU 标签布局 + GPU glyph atlas、文字与 halo；
 5. metatile、切片和异步 PNG 编码；

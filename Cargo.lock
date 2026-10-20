@@ -1076,6 +1076,8 @@ dependencies = [
  "bytemuck",
  "earcutr",
  "gdal",
+ "image",
+ "map-gpu",
  "pollster",
  "tiny-skia",
  "wgpu",

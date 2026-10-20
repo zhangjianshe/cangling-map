@@ -6,7 +6,11 @@ use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+// Map styles specify byte-space sRGB colors and the readback is encoded directly.
+// Using a non-sRGB attachment avoids a hidden linear-to-sRGB conversion that would
+// make CPU/GPU output differ before image encoding.
+const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const SAMPLE_COUNT: u32 = 4;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -96,6 +100,8 @@ pub struct PreparedScene {
     batches: Vec<DrawBatch>,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    _multisample_texture: wgpu::Texture,
+    multisample_view: wgpu::TextureView,
     output: wgpu::Buffer,
     width: u32,
     height: u32,
@@ -195,7 +201,10 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: SAMPLE_COUNT,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -280,6 +289,21 @@ impl Renderer {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
+        let multisample_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cangling-map multisample target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let multisample_view = multisample_texture.create_view(&Default::default());
         let unpadded_bytes_per_row = width * 4;
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
         let output = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -288,11 +312,14 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        stats.estimated_gpu_bytes += (u64::from(width) * u64::from(height) * 4 * 2) as usize;
+        stats.estimated_gpu_bytes +=
+            (u64::from(width) * u64::from(height) * 4 * (2 + u64::from(SAMPLE_COUNT))) as usize;
         Ok(PreparedScene {
             batches,
             texture,
             view,
+            _multisample_texture: multisample_texture,
+            multisample_view,
             output,
             width,
             height,
@@ -308,11 +335,11 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cangling-map vector pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &scene.view,
-                    resolve_target: None,
+                    view: &scene.multisample_view,
+                    resolve_target: Some(&scene.view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                 })],
                 depth_stencil_attachment: None,
