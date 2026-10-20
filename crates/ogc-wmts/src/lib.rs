@@ -83,6 +83,19 @@ impl WmtsRequest {
                 "outside tile matrix".into(),
             ));
         }
+        let pixel_ratio = self
+            .parameters
+            .get("PIXELRATIO")
+            .map(String::as_str)
+            .unwrap_or("1")
+            .parse::<u8>()
+            .map_err(|_| WmtsError::InvalidParameter("PIXELRATIO", "not an integer".into()))?;
+        if !matches!(pixel_ratio, 1 | 2) {
+            return Err(WmtsError::InvalidParameter(
+                "PIXELRATIO",
+                "must be 1 or 2".into(),
+            ));
+        }
         Ok(TileRequest {
             layer: required(&self.parameters, "LAYER")?.into(),
             style: self
@@ -93,6 +106,7 @@ impl WmtsRequest {
             zoom,
             row,
             col,
+            pixel_ratio,
         })
     }
 }
@@ -104,6 +118,9 @@ pub struct TileRequest {
     pub zoom: u8,
     pub row: u32,
     pub col: u32,
+    /// Non-standard HiDPI extension. A value of 2 returns a 512px image for a
+    /// logical 256px WMTS tile.
+    pub pixel_ratio: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -203,5 +220,20 @@ mod tests {
         assert_eq!(bounds.min_y, 0.0);
         assert_eq!(bounds.max_x, 0.0);
         assert_eq!(bounds.max_y, WEB_MERCATOR_HALF_WORLD);
+    }
+
+    #[test]
+    fn parses_supported_hidpi_pixel_ratio() {
+        let request = WmtsRequest::from_query(HashMap::from([
+            ("REQUEST".into(), "GetTile".into()),
+            ("TILEMATRIXSET".into(), MATRIX_SET.into()),
+            ("TILEMATRIX".into(), "3".into()),
+            ("TILEROW".into(), "2".into()),
+            ("TILECOL".into(), "4".into()),
+            ("LAYER".into(), "roads".into()),
+            ("PIXELRATIO".into(), "2".into()),
+        ]))
+        .unwrap();
+        assert_eq!(request.tile().unwrap().pixel_ratio, 2);
     }
 }

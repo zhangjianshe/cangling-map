@@ -1,3 +1,4 @@
+document.head.append(Object.assign(document.createElement("script"),{src:"/assets/service-frame.js"}));
 const byId = id => document.getElementById(id);
 const integer = new Intl.NumberFormat('zh-CN');
 
@@ -20,6 +21,9 @@ function render(data) {
   byId('rendered-tiles').textContent = integer.format(data.rendered_tiles);
   byId('render-failures').textContent = `失败 ${integer.format(data.render_failures)}`;
   byId('coalesced').textContent = integer.format(data.coalesced_requests);
+  byId('cache-backend').textContent = data.cache_backend.label;
+  byId('cache-backend-detail').textContent = data.cache_backend.detail;
+  byId('cache-backend').dataset.backend = data.cache_backend.backend;
   byId('render-ms').textContent = `${data.average_render_ms.toFixed(2)} ms`;
   byId('cache-write-ms').textContent = `${data.average_cache_write_ms.toFixed(2)} ms`;
   byId('active-requests').textContent = integer.format(data.active_tile_requests);

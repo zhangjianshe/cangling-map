@@ -63,8 +63,33 @@ TILE_CACHE_URL=http://127.0.0.1:7601
 TILE_CACHE_TOKEN=replace-with-the-cangling-tile-write-token
 ```
 
-Keep cache tokens in the process environment or a local secret manager; do not
-commit them to the repository.
+The same remote settings can be changed at runtime from **设置 → 缓存服务**.
+When enabled, the persisted Cangling Tile settings override the environment
+backend immediately. When disabled or absent, the startup environment remains
+the local fallback. Settings are stored in the `system_settings` table of the
+catalog database (`catalog.db` by default). The access token is never returned
+by the settings read API.
+
+Vector reprojection is cached independently from rendered WMTS tiles. The
+defaults favor large administrative datasets and tile-sized requests:
+
+```bash
+VECTOR_PROJECTION_CACHE_MB=2048
+VECTOR_PROJECTION_CACHE_SIZE=32
+VECTOR_PROJECTION_CACHE_PATH=./vector-projection-cache
+VECTOR_PROJECTION_SCOPE=local
+VECTOR_PROJECTION_METATILE_FACTOR=4
+```
+
+Projected FlatGeobuf datasets are stored below `VECTOR_PROJECTION_CACHE_PATH`.
+The cache key includes source sidecar sizes and modification times, target CRS,
+so changed source data is rebuilt automatically and valid entries survive a
+server restart. Persistent entries contain the complete target-CRS dataset and
+its spatial index; request bounds are applied while reading it. This produces
+one reusable file per source and target CRS instead of one file per viewport.
+Set the path to an empty string to disable persistent projection caching. In
+that in-memory-only mode, `local` snaps projection work to a reusable metatile
+envelope, while `full` projects the complete source.
 
 `cangling-map` first reads the tile from `cangling-tile`. On a `404` cache miss it
 renders the tile with GDAL, returns it to the WMTS client, and writes it back with
@@ -78,6 +103,34 @@ deployment requires a fixed shared cache namespace.
 
 The initial WMS endpoint intentionally returns a structured `OperationNotSupported`
 exception until capabilities and rendering are implemented.
+
+## Docker release
+
+Release tags publish a GDAL-enabled multi-platform image for `linux/amd64` and
+`linux/arm64`:
+
+```text
+soft.cangling.cn:22002/cangling/cangling-map:<version>
+soft.cangling.cn:22002/cangling/cangling-map:latest
+```
+
+The build and runtime stages use the public OSGeo image
+`ghcr.io/osgeo/gdal:ubuntu-small-3.13.0`. The version is pinned because
+`cangling-gdal` targets GDAL 3.13; the upstream `latest` tag may move to a newer
+development ABI.
+
+`cangling-gdal-core` is included in this repository's Cargo workspace, so the
+image can be built from a single checkout:
+
+```bash
+docker buildx build \
+  -t cangling-map:local .
+```
+
+Configure the GitHub repository secrets `HARBOR_USERNAME` and
+`HARBOR_PASSWORD` for registry publishing. Run
+`./release.sh` from a clean worktree to execute preflight checks, increment the
+patch version, create `v<version>`, and push the branch and tag.
 
 ## Planned milestones
 

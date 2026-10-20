@@ -5,4 +5,11 @@
 .vscode/
 catalog.db
 catalog.db-*
+catalog.db.before-*
+vector-projection-cache*/
 wmts-cache/
+map-settings.json
+
+# Administrative source datasets are deployment assets, not Git source files.
+/backups/*/data/*
+!/backups/*/data/.gitkeep

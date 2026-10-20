@@ -87,6 +87,7 @@ pub struct CapabilitiesLayer {
 
 #[derive(Debug, Clone)]
 pub struct CapabilitiesGroup {
+    pub name: String,
     pub title: String,
     pub abstract_text: Option<String>,
     pub layers: Vec<CapabilitiesLayer>,
@@ -104,7 +105,8 @@ pub fn capabilities_xml(
     }
     for group in groups {
         layer_xml.push_str(&format!(
-            "<Layer><Title>{}</Title>",
+            "<Layer><Name>{}</Name><Title>{}</Title>",
+            xml_escape(&group.name),
             xml_escape(&group.title)
         ));
         if let Some(text) = &group.abstract_text {
@@ -252,13 +254,14 @@ mod tests {
             "http://localhost/wms",
             &[],
             &[CapabilitiesGroup {
+                name: "base".into(),
                 title: "基础数据".into(),
                 abstract_text: Some("底图目录".into()),
                 layers: vec![layer],
             }],
         );
         assert!(xml.contains(
-            "<Layer><Title>基础数据</Title><Abstract>底图目录</Abstract><Layer queryable=\"0\"><Name>terrain</Name>"
+            "<Layer><Name>base</Name><Title>基础数据</Title><Abstract>底图目录</Abstract><Layer queryable=\"0\"><Name>terrain</Name>"
         ));
     }
 }

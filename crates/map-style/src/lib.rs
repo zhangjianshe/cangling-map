@@ -28,11 +28,17 @@ pub struct PolygonSymbolizer {
     pub stroke_opacity: f32,
     pub stroke_width: f32,
     #[serde(default)]
+    pub stroke_dasharray: Vec<f32>,
+    #[serde(default)]
     pub label: Option<String>,
     #[serde(default = "default_font_family")]
     pub font_family: String,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
+    #[serde(default)]
+    pub font_italic: bool,
+    #[serde(default)]
+    pub font_bold: bool,
     #[serde(default = "default_font_fill")]
     pub font_fill: Rgba,
     #[serde(default = "default_halo_color")]
@@ -45,6 +51,12 @@ pub struct PolygonSymbolizer {
     pub label_min_area: f32,
     #[serde(default)]
     pub label_repeat_distance: f32,
+    #[serde(default = "default_label_repeat_count")]
+    pub label_repeat_count: u32,
+}
+
+fn default_label_repeat_count() -> u32 {
+    1
 }
 
 fn default_image_scale() -> f32 {
@@ -186,15 +198,19 @@ fn parse_rule(
         stroke: None,
         stroke_opacity: 1.0,
         stroke_width: 1.0,
+        stroke_dasharray: Vec::new(),
         label: None,
         font_family: default_font_family(),
         font_size: default_font_size(),
+        font_italic: false,
+        font_bold: false,
         font_fill: default_font_fill(),
         halo_color: default_halo_color(),
         halo_radius: default_halo_radius(),
         label_spacing: 0.0,
         label_min_area: 0.0,
         label_repeat_distance: 0.0,
+        label_repeat_count: 1,
     };
     for declaration in declarations
         .split(';')
@@ -216,6 +232,28 @@ fn parse_rule(
             "stroke" => symbolizer.stroke = Some(parse_color_expression(source, value, offset)?),
             "stroke-opacity" => symbolizer.stroke_opacity = parse_opacity(source, value, offset)?,
             "stroke-width" => symbolizer.stroke_width = parse_width(source, value, offset)?,
+            "stroke-dasharray" => {
+                let values = value
+                    .split(|character: char| character == ',' || character.is_whitespace())
+                    .filter(|part| !part.is_empty())
+                    .map(|part| {
+                        parse_positive_number(
+                            source,
+                            part.trim_end_matches("px"),
+                            offset,
+                            "stroke-dasharray",
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if values.len() < 2 || values.len() % 2 != 0 {
+                    return Err(error_at(
+                        source,
+                        offset,
+                        "stroke-dasharray requires an even number of positive lengths",
+                    ));
+                }
+                symbolizer.stroke_dasharray = values;
+            }
             "label" => symbolizer.label = Some(parse_label_property(source, value, offset)?),
             "font-family" => symbolizer.font_family = value.trim_matches(['\'', '"']).to_owned(),
             "font-size" => {
@@ -225,6 +263,32 @@ fn parse_rule(
                     offset,
                     "font-size",
                 )?
+            }
+            "font-style" => {
+                symbolizer.font_italic = match value.to_ascii_lowercase().as_str() {
+                    "normal" => false,
+                    "italic" | "oblique" => true,
+                    _ => {
+                        return Err(error_at(
+                            source,
+                            offset,
+                            "font-style must be normal, italic or oblique",
+                        ))
+                    }
+                }
+            }
+            "font-weight" => {
+                symbolizer.font_bold = match value.to_ascii_lowercase().as_str() {
+                    "normal" | "400" => false,
+                    "bold" | "600" | "700" => true,
+                    _ => {
+                        return Err(error_at(
+                            source,
+                            offset,
+                            "font-weight must be normal, bold, 400, 600 or 700",
+                        ))
+                    }
+                }
             }
             "font-fill" => symbolizer.font_fill = parse_color(source, value, offset)?,
             "halo-color" => symbolizer.halo_color = parse_color(source, value, offset)?,
@@ -240,6 +304,23 @@ fn parse_rule(
             "label-min-area" => symbolizer.label_min_area = parse_width(source, value, offset)?,
             "label-repeat-distance" => {
                 symbolizer.label_repeat_distance = parse_width(source, value, offset)?
+            }
+            "label-repeat-count" => {
+                let count = value.parse::<u32>().map_err(|_| {
+                    error_at(
+                        source,
+                        offset,
+                        "label-repeat-count must be a positive integer",
+                    )
+                })?;
+                if count == 0 || count > 32 {
+                    return Err(error_at(
+                        source,
+                        offset,
+                        "label-repeat-count must be between 1 and 32",
+                    ));
+                }
+                symbolizer.label_repeat_count = count;
             }
             _ => {
                 return Err(error_at(
@@ -669,6 +750,20 @@ fn write_rule(xml: &mut String, rule: &Rule) {
             &rule.symbolizer.stroke_width.to_string(),
             14,
         );
+        if !rule.symbolizer.stroke_dasharray.is_empty() {
+            parameter(
+                xml,
+                "stroke-dasharray",
+                &rule
+                    .symbolizer
+                    .stroke_dasharray
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                14,
+            );
+        }
         xml.push_str("            </se:Stroke>\n");
     }
     if has_polygon_symbolizer {
@@ -680,6 +775,12 @@ fn write_rule(xml: &mut String, rule: &Rule) {
         xml.push_str("</ogc:PropertyName></se:Label>\n            <se:Font>\n");
         parameter(xml, "font-family", &rule.symbolizer.font_family, 14);
         parameter(xml, "font-size", &rule.symbolizer.font_size.to_string(), 14);
+        if rule.symbolizer.font_italic {
+            parameter(xml, "font-style", "italic", 14);
+        }
+        if rule.symbolizer.font_bold {
+            parameter(xml, "font-weight", "bold", 14);
+        }
         xml.push_str("            </se:Font>\n            <se:Halo>\n              <se:Radius>");
         xml.push_str(&rule.symbolizer.halo_radius.to_string());
         xml.push_str("</se:Radius>\n              <se:Fill>\n");
@@ -700,6 +801,12 @@ fn write_rule(xml: &mut String, rule: &Rule) {
                     "            <se:VendorOption name=\"{name}\">{value}</se:VendorOption>\n"
                 ));
             }
+        }
+        if rule.symbolizer.label_repeat_count > 1 {
+            xml.push_str(&format!(
+                "            <se:VendorOption name=\"label-repeat-count\">{}</se:VendorOption>\n",
+                rule.symbolizer.label_repeat_count
+            ));
         }
         xml.push_str("          </se:TextSymbolizer>\n");
     }
@@ -869,12 +976,13 @@ mod tests {
     fn compiles_field_labels_to_ir_and_sld() {
         let style = compile_geocss(
             "labels",
-            "* { label: [name]; font-family: 'Noto Sans CJK SC'; font-size: 16px; font-fill: #20352a; halo-color: #ffffff; halo-radius: 2px; label-spacing: 8px; label-min-area: 900px; label-repeat-distance: 160px; }",
+            "* { label: [name]; font-family: 'Noto Sans CJK SC'; font-size: 16px; font-style: italic; font-fill: #20352a; halo-color: #ffffff; halo-radius: 2px; label-spacing: 8px; label-min-area: 900px; label-repeat-distance: 160px; }",
         )
         .unwrap();
         let symbolizer = &style.rules[0].symbolizer;
         assert_eq!(symbolizer.label.as_deref(), Some("name"));
         assert_eq!(symbolizer.font_size, 16.0);
+        assert!(symbolizer.font_italic);
         assert_eq!(symbolizer.halo_radius, 2.0);
         assert_eq!(symbolizer.label_spacing, 8.0);
         assert_eq!(symbolizer.label_min_area, 900.0);
@@ -883,6 +991,7 @@ mod tests {
         assert!(sld.contains("<se:TextSymbolizer>"));
         assert!(sld.contains("<ogc:PropertyName>name</ogc:PropertyName>"));
         assert!(sld.contains("<se:SvgParameter name=\"font-family\">Noto Sans CJK SC"));
+        assert!(sld.contains("<se:SvgParameter name=\"font-style\">italic"));
         assert!(sld.contains("<se:VendorOption name=\"label-spacing\">8"));
     }
 }

@@ -68,16 +68,20 @@ impl VectorRasterizer for GdalVectorRasterizer {
                         VectorColor::Literal(_) => None,
                     }),
                     stroke_width: rule.paint.stroke_width,
+                    stroke_dasharray: rule.paint.stroke_dasharray.clone(),
                     text: rule.paint.text.as_ref().map(|text| GdalVectorTextStyle {
                         field: text.field.clone(),
                         font_family: text.font_family.clone(),
                         font_size: text.font_size,
+                        font_italic: text.font_italic,
+                        font_bold: text.font_bold,
                         fill: rgba(text.fill),
                         halo: rgba(text.halo),
                         halo_radius: text.halo_radius,
                         spacing: text.spacing,
                         min_area: text.min_area,
                         repeat_distance: text.repeat_distance,
+                        repeat_count: text.repeat_count,
                     }),
                 })
             })
@@ -134,6 +138,7 @@ fn optimize_image_rules(mut rules: Vec<GdalVectorRenderRule>) -> Vec<GdalVectorR
             text_rule.stroke = None;
             text_rule.stroke_field = None;
             text_rule.stroke_width = 0.0;
+            text_rule.stroke_dasharray.clear();
             text_rules.push(text_rule);
             rule.text = None;
         }
@@ -141,12 +146,18 @@ fn optimize_image_rules(mut rules: Vec<GdalVectorRenderRule>) -> Vec<GdalVectorR
     let mut base_stroke = None;
     for rule in &mut rules {
         if rule.where_clause.is_none() {
-            base_stroke = Some((rule.stroke, rule.stroke_field.clone(), rule.stroke_width));
+            base_stroke = Some((
+                rule.stroke,
+                rule.stroke_field.clone(),
+                rule.stroke_width,
+                rule.stroke_dasharray.clone(),
+            ));
         } else if has_fill(rule) && rule.stroke.is_none() && rule.stroke_field.is_none() {
-            if let Some((stroke, stroke_field, stroke_width)) = &base_stroke {
+            if let Some((stroke, stroke_field, stroke_width, stroke_dasharray)) = &base_stroke {
                 rule.stroke = *stroke;
                 rule.stroke_field = stroke_field.clone();
                 rule.stroke_width = *stroke_width;
+                rule.stroke_dasharray = stroke_dasharray.clone();
             }
         }
     }
@@ -294,6 +305,7 @@ mod tests {
             stroke: None,
             stroke_field: None,
             stroke_width: 1.0,
+            stroke_dasharray: Vec::new(),
             text: None,
         }
     }
@@ -329,12 +341,15 @@ mod tests {
             field: "name".into(),
             font_family: "Noto Sans CJK SC".into(),
             font_size: 14.0,
+            font_italic: false,
+            font_bold: false,
             fill: [0, 0, 0, 255],
             halo: [255, 255, 255, 255],
             halo_radius: 2.0,
             spacing: 8.0,
             min_area: 900.0,
             repeat_distance: 160.0,
+            repeat_count: 1,
         });
         let mut missing_image_fallback = image_rule(Some("\"type\" = 2"), "missing.png");
         missing_image_fallback.fill_image = None;

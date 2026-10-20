@@ -13,7 +13,7 @@ use anyhow::Context;
 use axum::{
     body::Bytes as AxumBytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -29,8 +29,8 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use map_catalog::{
-    Catalog, CatalogItem, CatalogItemId, LayerGroup, PublicationStore, PublishedLayer, SourceKind,
-    SqliteCatalog, StyleRecord, StyleStore,
+    Catalog, CatalogItem, CatalogItemId, LayerGroup, LayerGroupMember, PublicationStore,
+    PublishedLayer, SourceKind, SqliteCatalog, StyleRecord, StyleStore,
 };
 use map_render::{
     blank_image, blank_png, ImageFormat as RenderImageFormat, VectorColor, VectorImageFill,
@@ -58,7 +58,9 @@ static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>>
 #[derive(Clone)]
 struct AppState {
     catalog: SqliteCatalog,
-    wmts_cache: WmtsCache,
+    wmts_cache: Arc<StdMutex<WmtsCache>>,
+    local_wmts_cache: WmtsCache,
+    cache_service_settings: Arc<StdMutex<CacheServiceSettings>>,
     vector_rasterizer: Arc<dyn VectorRasterizer>,
     render_limit: Arc<Semaphore>,
     tile_flights: Arc<StdMutex<HashMap<WmtsCacheKey, Weak<Mutex<()>>>>>,
@@ -310,6 +312,117 @@ impl WmtsCache {
             value => anyhow::bail!("unsupported WMTS_CACHE_BACKEND: {value}"),
         }
     }
+
+    fn cangling_tile(settings: &CacheServiceSettings) -> Result<Self, String> {
+        let base_url = settings.base_url.trim().trim_end_matches('/').to_owned();
+        if !base_url.starts_with("http://") {
+            return Err("Cangling Tile 地址当前必须使用 http://".into());
+        }
+        Ok(Self::CanglingTile {
+            base_url,
+            token: settings.token.clone(),
+            database_id: settings
+                .database_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            client: Client::builder(TokioExecutor::new()).build_http(),
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Filesystem { .. } => "filesystem",
+            Self::CanglingTile { .. } => "cangling-tile",
+            Self::None => "none",
+        }
+    }
+
+    fn status(&self) -> CacheBackendStatus {
+        match self {
+            Self::Filesystem { root } => CacheBackendStatus {
+                backend: "filesystem",
+                label: "本地目录".into(),
+                detail: root.display().to_string(),
+            },
+            Self::CanglingTile {
+                base_url,
+                database_id,
+                ..
+            } => CacheBackendStatus {
+                backend: "cangling-tile",
+                label: "Cangling Tile".into(),
+                detail: database_id
+                    .as_deref()
+                    .map(|database| format!("{base_url} · {database}"))
+                    .unwrap_or_else(|| base_url.clone()),
+            },
+            Self::None => CacheBackendStatus {
+                backend: "none",
+                label: "未启用".into(),
+                detail: "当前未配置 WMTS 缓存".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CacheServiceSettings {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    database_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheServiceSettingsInput {
+    enabled: bool,
+    base_url: String,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    clear_token: bool,
+    #[serde(default)]
+    database_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CacheServiceSettingsView {
+    enabled: bool,
+    base_url: String,
+    database_id: Option<String>,
+    has_token: bool,
+    effective_backend: &'static str,
+    local_backend: &'static str,
+}
+
+fn active_wmts_cache(state: &AppState) -> WmtsCache {
+    state
+        .wmts_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+fn cache_service_settings_view(state: &AppState) -> CacheServiceSettingsView {
+    let settings = state
+        .cache_service_settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    CacheServiceSettingsView {
+        enabled: settings.enabled,
+        base_url: settings.base_url,
+        database_id: settings.database_id,
+        has_token: !settings.token.is_empty(),
+        effective_backend: active_wmts_cache(state).name(),
+        local_backend: state.local_wmts_cache.name(),
+    }
 }
 
 #[derive(Serialize)]
@@ -317,10 +430,38 @@ struct ApiError {
     error: String,
 }
 
+#[derive(Serialize)]
+struct CatalogItemView {
+    #[serde(flatten)]
+    item: CatalogItem,
+    reference_count: usize,
+}
+
 #[derive(Deserialize)]
 struct InspectSourceRequest {
     source_kind: String,
     source_config: Value,
+}
+
+#[derive(Deserialize)]
+struct HostFilesQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HostFileEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    created_unix_ms: Option<u128>,
+}
+
+#[derive(Serialize)]
+struct HostFilesResponse {
+    path: String,
+    parent: Option<String>,
+    entries: Vec<HostFileEntry>,
 }
 
 #[derive(Deserialize)]
@@ -353,6 +494,7 @@ impl Default for VectorRenderingStyle {
                     fill_image: None,
                     stroke: None,
                     stroke_width: 0.0,
+                    stroke_dasharray: Vec::new(),
                     text: None,
                 },
             }],
@@ -388,11 +530,30 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(4);
+    let local_wmts_cache = WmtsCache::from_env().context("failed to configure WMTS cache")?;
+    let catalog = SqliteCatalog::connect(&database_url)
+        .await
+        .context("failed to initialize catalog")?;
+    let cache_service_settings: CacheServiceSettings = catalog
+        .get_setting("cache_service")
+        .await
+        .context("failed to load cache service settings")?
+        .map(serde_json::from_value)
+        .transpose()
+        .context("invalid cache service settings in catalog")?
+        .unwrap_or_default();
+    let active_wmts_cache = if cache_service_settings.enabled {
+        WmtsCache::cangling_tile(&cache_service_settings)
+            .map_err(anyhow::Error::msg)
+            .context("invalid persisted cache service settings")?
+    } else {
+        local_wmts_cache.clone()
+    };
     let state = AppState {
-        catalog: SqliteCatalog::connect(&database_url)
-            .await
-            .context("failed to initialize catalog")?,
-        wmts_cache: WmtsCache::from_env().context("failed to configure WMTS cache")?,
+        catalog,
+        wmts_cache: Arc::new(StdMutex::new(active_wmts_cache)),
+        local_wmts_cache,
+        cache_service_settings: Arc::new(StdMutex::new(cache_service_settings)),
         vector_rasterizer: Arc::new(map_gdal::GdalVectorRasterizer),
         render_limit: Arc::new(Semaphore::new(render_concurrency)),
         tile_flights: Arc::new(StdMutex::new(HashMap::new())),
@@ -400,16 +561,24 @@ async fn main() -> anyhow::Result<()> {
         metrics: Arc::new(ServiceMetrics::default()),
     };
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(metrics_page))
+        .route("/catalog", get(index))
         .route("/assets/styles.css", get(styles))
+        .route("/assets/service-frame.js", get(service_frame_script))
         .route("/assets/app.js", get(script))
         .route("/published-layers", get(published_page))
         .route("/assets/published.js", get(published_script))
         .route("/styles", get(style_management_page))
         .route("/style-assets", get(style_assets_page))
         .route("/metrics", get(metrics_page))
+        .route("/settings/cache", get(cache_settings_page))
         .route("/api/metrics", get(metrics_snapshot))
+        .route(
+            "/api/settings/cache-service",
+            get(get_cache_service_settings).put(update_cache_service_settings),
+        )
         .route("/assets/metrics.js", get(metrics_script))
+        .route("/assets/cache-settings.js", get(cache_settings_script))
         .route("/assets/style-assets.js", get(style_assets_script))
         .route("/style-assets/{*path}", get(style_asset_file))
         .route("/assets/style-editor.js", get(style_editor_script))
@@ -424,6 +593,7 @@ async fn main() -> anyhow::Result<()> {
             "/published-layers/{id}/preview",
             get(published_preview_page),
         )
+        .route("/layer-groups/{id}/preview", get(published_preview_page))
         .route("/assets/preview.js", get(published_preview_script))
         .route("/assets/openlayers/ol.js", get(openlayers_script))
         .route("/assets/openlayers/ol.css", get(openlayers_styles))
@@ -433,6 +603,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/wms", get(wms))
         .route("/wmts", get(wmts))
         .route("/api/catalog", get(list_catalog).post(create_catalog_item))
+        .route("/api/host-files", axum::routing::post(list_host_files))
         .route("/api/catalog/{id}/features", get(preview_catalog_features))
         .route("/api/catalog/{id}/field-stats", get(catalog_field_stats))
         .route(
@@ -484,7 +655,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
-    let address = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let address = std::env::var("MAP_SERVER_ADDRESS")
+        .unwrap_or_else(|_| "127.0.0.1:3000".into())
+        .parse::<SocketAddr>()
+        .context("invalid MAP_SERVER_ADDRESS")?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
@@ -526,6 +700,89 @@ async fn inspect_catalog_source(Json(request): Json<InspectSourceRequest>) -> Re
     }
 }
 
+async fn list_host_files(headers: HeaderMap, Json(query): Json<HostFilesQuery>) -> Response {
+    let requested_with = headers
+        .get("x-requested-with")
+        .and_then(|value| value.to_str().ok());
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    let same_origin = match (host, origin) {
+        (Some(host), Some(origin)) => {
+            origin == format!("http://{host}") || origin == format!("https://{host}")
+        }
+        _ => false,
+    };
+    if requested_with != Some("CanglingMap") || !same_origin {
+        return api_message(StatusCode::FORBIDDEN, "主机路径浏览请求来源无效");
+    }
+
+    let requested = query.path.as_deref().filter(|path| !path.trim().is_empty());
+    let path = match requested
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        .canonicalize()
+    {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => return api_message(StatusCode::BAD_REQUEST, "主机路径不是目录"),
+        Err(error) => {
+            return api_message(
+                StatusCode::BAD_REQUEST,
+                &format!("无法访问主机路径：{error}"),
+            )
+        }
+    };
+    let directory = match std::fs::read_dir(&path) {
+        Ok(directory) => directory,
+        Err(error) => {
+            return api_message(StatusCode::FORBIDDEN, &format!("无法读取主机目录：{error}"))
+        }
+    };
+    let mut entries = directory
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() && !file_type.is_file() {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            let created_unix_ms = metadata
+                .created()
+                .or_else(|_| metadata.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis());
+            Some(HostFileEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path: entry.path().to_string_lossy().into_owned(),
+                is_dir: file_type.is_dir(),
+                size: if file_type.is_file() {
+                    metadata.len()
+                } else {
+                    0
+                },
+                created_unix_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    let parent = path.parent();
+    Json(HostFilesResponse {
+        path: path.to_string_lossy().into_owned(),
+        parent: parent.map(|parent| parent.to_string_lossy().into_owned()),
+        entries,
+    })
+    .into_response()
+}
+
 async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
@@ -547,6 +804,82 @@ async fn style_assets_page() -> Html<&'static str> {
 async fn metrics_page() -> Html<&'static str> {
     Html(include_str!("../web/metrics.html"))
 }
+async fn cache_settings_page() -> Html<&'static str> {
+    Html(include_str!("../web/cache-settings.html"))
+}
+
+async fn get_cache_service_settings(State(state): State<AppState>) -> Response {
+    Json(cache_service_settings_view(&state)).into_response()
+}
+
+async fn update_cache_service_settings(
+    State(state): State<AppState>,
+    Json(input): Json<CacheServiceSettingsInput>,
+) -> Response {
+    let current = state
+        .cache_service_settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let token = if input.clear_token {
+        String::new()
+    } else {
+        input
+            .token
+            .filter(|token| !token.is_empty())
+            .unwrap_or(current.token)
+    };
+    let settings = CacheServiceSettings {
+        enabled: input.enabled,
+        base_url: input.base_url.trim().trim_end_matches('/').to_owned(),
+        token,
+        database_id: input
+            .database_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    };
+    let backend = if settings.enabled {
+        if settings.base_url.is_empty() {
+            return api_message(StatusCode::BAD_REQUEST, "启用远程缓存时必须填写服务地址");
+        }
+        match WmtsCache::cangling_tile(&settings) {
+            Ok(cache) => cache,
+            Err(error) => return api_message(StatusCode::BAD_REQUEST, &error),
+        }
+    } else {
+        state.local_wmts_cache.clone()
+    };
+    let setting_value = match serde_json::to_value(&settings) {
+        Ok(value) => value,
+        Err(error) => {
+            return api_message(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("序列化缓存服务设置失败：{error}"),
+            )
+        }
+    };
+    if let Err(error) = state
+        .catalog
+        .put_setting("cache_service", &setting_value)
+        .await
+    {
+        return api_message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("保存缓存服务设置失败：{error}"),
+        );
+    }
+    *state
+        .cache_service_settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+    *state
+        .wmts_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = backend;
+    Json(cache_service_settings_view(&state)).into_response()
+}
 
 #[derive(Serialize)]
 struct MetricsSnapshot {
@@ -562,10 +895,18 @@ struct MetricsSnapshot {
     render_concurrency_available: usize,
     active_tile_requests: usize,
     projection_cache_budget_mb: u64,
+    cache_backend: CacheBackendStatus,
     layers: Vec<LayerMetricsSnapshot>,
     slow_requests: Vec<SlowTileRequest>,
     series: Vec<MetricSeriesPoint>,
     render_cache: cangling_gdal_core::RenderCacheStats,
+}
+
+#[derive(Serialize)]
+struct CacheBackendStatus {
+    backend: &'static str,
+    label: String,
+    detail: String,
 }
 
 #[derive(Serialize)]
@@ -621,6 +962,7 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
     layers.sort_by(|left, right| right.requests.cmp(&left.requests));
     let slow_requests = details.slow_requests.iter().cloned().collect();
     let series = metric_series(&details.events);
+    let cache_backend = active_wmts_cache(&state).status();
     Json(MetricsSnapshot {
         uptime_seconds: state.metrics.started.elapsed().as_secs(),
         wmts_requests: state.metrics.wmts_requests.load(Ordering::Relaxed),
@@ -636,7 +978,8 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
         projection_cache_budget_mb: std::env::var("VECTOR_PROJECTION_CACHE_MB")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(512),
+            .unwrap_or(2048),
+        cache_backend,
         layers,
         slow_requests,
         series,
@@ -724,6 +1067,12 @@ async fn script() -> impl IntoResponse {
         include_str!("../web/app.js"),
     )
 }
+async fn service_frame_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/service-frame.js"),
+    )
+}
 async fn published_script() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
@@ -746,6 +1095,12 @@ async fn metrics_script() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../web/metrics.js"),
+    )
+}
+async fn cache_settings_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/cache-settings.js"),
     )
 }
 async fn ace_script() -> impl IntoResponse {
@@ -1104,7 +1459,15 @@ async fn vector_rendering_style(
     layer: &PublishedLayer,
     transparent: bool,
 ) -> Result<VectorRenderingStyle, String> {
-    let Some(style_id) = layer.default_style_id.as_deref() else {
+    vector_rendering_style_with_id(state, layer.default_style_id.as_deref(), transparent).await
+}
+
+async fn vector_rendering_style_with_id(
+    state: &AppState,
+    style_id: Option<&str>,
+    transparent: bool,
+) -> Result<VectorRenderingStyle, String> {
+    let Some(style_id) = style_id else {
         let mut palette = VectorRenderingStyle::default();
         if transparent {
             palette.background = [0, 0, 0, 0];
@@ -1121,6 +1484,61 @@ async fn vector_rendering_style(
     let style: Style = serde_json::from_value(record.compiled_ir)
         .map_err(|error| format!("样式编译结果无效：{error}"))?;
     rendering_style_from_style_scoped(&style, transparent, &warning_scope)
+}
+
+fn compose_images(
+    width: u32,
+    height: u32,
+    background: [u8; 4],
+    layers: &[(Vec<u8>, f64)],
+    format: ImageFormat,
+) -> Result<cangling_gdal_core::RenderedImage, String> {
+    use image::{DynamicImage, ImageFormat as EncoderFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    let mut canvas = RgbaImage::from_pixel(width, height, Rgba(background));
+    for (bytes, opacity) in layers {
+        let image = image::load_from_memory(bytes)
+            .map_err(|error| format!("无法解码成员图层：{error}"))?
+            .to_rgba8();
+        if image.dimensions() != (width, height) {
+            return Err("成员图层输出尺寸不一致".into());
+        }
+        let opacity = opacity.clamp(0.0, 1.0) as f32;
+        for (dst, src) in canvas.pixels_mut().zip(image.pixels()) {
+            let source_alpha = src[3] as f32 / 255.0 * opacity;
+            let destination_alpha = dst[3] as f32 / 255.0;
+            let output_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+            if output_alpha <= f32::EPSILON {
+                *dst = Rgba([0, 0, 0, 0]);
+                continue;
+            }
+            for channel in 0..3 {
+                dst[channel] = ((src[channel] as f32 * source_alpha
+                    + dst[channel] as f32 * destination_alpha * (1.0 - source_alpha))
+                    / output_alpha)
+                    .round() as u8;
+            }
+            dst[3] = (output_alpha * 255.0).round() as u8;
+        }
+    }
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(canvas)
+        .write_to(
+            &mut output,
+            match format {
+                ImageFormat::Png => EncoderFormat::Png,
+                ImageFormat::Jpeg => EncoderFormat::Jpeg,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(cangling_gdal_core::RenderedImage {
+        bytes: output.into_inner(),
+        content_type: match format {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1204,12 +1622,15 @@ fn rendering_style_from_style_scoped(
                 field: field.clone(),
                 font_family: rule.symbolizer.font_family.clone(),
                 font_size: rule.symbolizer.font_size,
+                font_italic: rule.symbolizer.font_italic,
+                font_bold: rule.symbolizer.font_bold,
                 fill: rule.symbolizer.font_fill,
                 halo: rule.symbolizer.halo_color,
                 halo_radius: rule.symbolizer.halo_radius,
                 spacing: rule.symbolizer.label_spacing,
                 min_area: rule.symbolizer.label_min_area,
                 repeat_distance: rule.symbolizer.label_repeat_distance,
+                repeat_count: rule.symbolizer.label_repeat_count,
             });
             if fill.is_none() && fill_image.is_none() && stroke.is_none() && text.is_none() {
                 return Err("样式规则没有面、线或文字符号".to_owned());
@@ -1223,6 +1644,7 @@ fn rendering_style_from_style_scoped(
                     fill_image,
                     stroke,
                     stroke_width: rule.symbolizer.stroke_width,
+                    stroke_dasharray: rule.symbolizer.stroke_dasharray.clone(),
                     text,
                 },
             })
@@ -1253,6 +1675,30 @@ fn warn_missing_style_asset(scope: &str, path: &str) {
             "style fill image is missing; rendering a gray fallback"
         );
     }
+}
+
+fn scale_rendering_style(mut style: VectorRenderingStyle, scale: f32) -> VectorRenderingStyle {
+    if (scale - 1.0).abs() <= f32::EPSILON {
+        return style;
+    }
+    let area_scale = scale * scale;
+    for rule in &mut style.rules {
+        rule.paint.stroke_width *= scale;
+        for dash in &mut rule.paint.stroke_dasharray {
+            *dash *= scale;
+        }
+        if let Some(image) = &mut rule.paint.fill_image {
+            image.scale *= scale;
+        }
+        if let Some(text) = &mut rule.paint.text {
+            text.font_size *= scale;
+            text.halo_radius *= scale;
+            text.spacing *= scale;
+            text.min_area *= area_scale;
+            text.repeat_distance *= scale;
+        }
+    }
+    style
 }
 
 fn render_vector_request(
@@ -1375,9 +1821,61 @@ async fn validate_style(Json(input): Json<StyleInput>) -> Response {
     }
 }
 
-async fn list_styles(State(state): State<AppState>) -> Response {
+#[derive(Debug, Default, Deserialize)]
+struct ListQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
+    q: Option<String>,
+}
+
+fn paged_list_response<T: Serialize>(items: Vec<T>, query: &ListQuery) -> Response {
+    if query.page.is_none() && query.page_size.is_none() && query.q.is_none() {
+        return Json(items).into_response();
+    }
+    let page_size = query.page_size.unwrap_or(20).clamp(5, 200);
+    let total = items.len();
+    let total_pages = total.div_ceil(page_size).max(1);
+    let page = query.page.unwrap_or(1).clamp(1, total_pages);
+    let offset = (page - 1) * page_size;
+    let items = items
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages
+    }))
+    .into_response()
+}
+
+fn contains_query(values: &[&str], query: &ListQuery) -> bool {
+    let Some(term) = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    let term = term.to_lowercase();
+    values
+        .iter()
+        .any(|value| value.to_lowercase().contains(&term))
+}
+
+async fn list_styles(State(state): State<AppState>, Query(query): Query<ListQuery>) -> Response {
     match state.catalog.list_styles().await {
-        Ok(styles) => Json(styles).into_response(),
+        Ok(styles) => paged_list_response(
+            styles
+                .into_iter()
+                .filter(|item| contains_query(&[&item.app_id, &item.name, &item.title], &query))
+                .collect(),
+            &query,
+        ),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
     }
 }
@@ -1461,7 +1959,8 @@ async fn layer_cache_location(
     state: &AppState,
     layer: &PublishedLayer,
 ) -> Result<(String, String), String> {
-    let database = match &state.wmts_cache {
+    let cache = active_wmts_cache(state);
+    let database = match &cache {
         WmtsCache::CanglingTile {
             database_id: Some(id),
             ..
@@ -1473,6 +1972,14 @@ async fn layer_cache_location(
 
 fn layer_cache_item_id(layer: &PublishedLayer) -> String {
     sha256_hex(layer.id.as_bytes())
+}
+
+fn pixel_ratio_cache_item(item: &str, pixel_ratio: u8) -> String {
+    if pixel_ratio == 1 {
+        item.to_owned()
+    } else {
+        sha256_hex(format!("{item}\0{pixel_ratio}x").as_bytes())
+    }
 }
 
 async fn clear_layers_using_style(state: &AppState, style_id: &str) {
@@ -1510,16 +2017,23 @@ async fn clear_layer_cache(
     layer: &PublishedLayer,
 ) -> Result<CacheClearResult, String> {
     let (database, item) = layer_cache_location(state, layer).await?;
-    match &state.wmts_cache {
+    let cache = active_wmts_cache(state);
+    match &cache {
         WmtsCache::None => Ok(CacheClearResult {
             backend: "none",
             cleared_targets: 0,
             message: "当前未启用瓦片缓存".into(),
         }),
         WmtsCache::Filesystem { root } => {
-            let target = root.join(&database).join(&item);
+            let targets = [
+                root.join(&database).join(&item),
+                root.join(&database).join(pixel_ratio_cache_item(&item, 2)),
+            ];
             tokio::task::spawn_blocking(move || {
-                let cleared = clear_filesystem_layer_cache(&target)?;
+                let mut cleared = 0;
+                for target in targets {
+                    cleared += clear_filesystem_layer_cache(&target)?;
+                }
                 Ok(CacheClearResult {
                     backend: "filesystem",
                     cleared_targets: cleared,
@@ -1535,29 +2049,33 @@ async fn clear_layer_cache(
             client,
             ..
         } => {
-            let url = format!(
-                "{base_url}/api/v1/databases/{}/tilesets/{}",
-                percent_encode(&database),
-                percent_encode(&item)
-            );
-            let mut builder = hyper::Request::delete(url);
-            if !token.is_empty() {
-                builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
-            }
-            let response = client
-                .request(
-                    builder
-                        .body(Full::new(Bytes::new()))
-                        .map_err(|error| error.to_string())?,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            let cleared = usize::from(response.status().is_success());
-            if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
-                return Err(format!(
-                    "cangling-tile DELETE returned {} for tileset {item}",
-                    response.status()
-                ));
+            let cache_items = [item.clone(), pixel_ratio_cache_item(&item, 2)];
+            let mut cleared = 0;
+            for cache_item in cache_items {
+                let url = format!(
+                    "{base_url}/api/v1/databases/{}/tilesets/{}",
+                    percent_encode(&database),
+                    percent_encode(&cache_item)
+                );
+                let mut builder = hyper::Request::delete(url);
+                if !token.is_empty() {
+                    builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+                }
+                let response = client
+                    .request(
+                        builder
+                            .body(Full::new(Bytes::new()))
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                cleared += usize::from(response.status().is_success());
+                if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+                    return Err(format!(
+                        "cangling-tile DELETE returned {} for tileset {cache_item}",
+                        response.status()
+                    ));
+                }
             }
             Ok(CacheClearResult {
                 backend: "cangling-tile",
@@ -1576,9 +2094,18 @@ fn clear_filesystem_layer_cache(target: &std::path::Path) -> Result<usize, Strin
     }
 }
 
-async fn list_layer_groups(State(state): State<AppState>) -> Response {
+async fn list_layer_groups(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
     match state.catalog.list_layer_groups().await {
-        Ok(groups) => Json(groups).into_response(),
+        Ok(groups) => paged_list_response(
+            groups
+                .into_iter()
+                .filter(|item| contains_query(&[&item.app_id, &item.name, &item.title], &query))
+                .collect(),
+            &query,
+        ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
@@ -1618,9 +2145,18 @@ async fn delete_layer_group(State(state): State<AppState>, Path(id): Path<String
     }
 }
 
-async fn list_published_layers(State(state): State<AppState>) -> Response {
+async fn list_published_layers(
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> Response {
     match state.catalog.list_published_layers().await {
-        Ok(items) => Json(items).into_response(),
+        Ok(items) => paged_list_response(
+            items
+                .into_iter()
+                .filter(|item| contains_query(&[&item.app_id, &item.name, &item.title], &query))
+                .collect(),
+            &query,
+        ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
@@ -1670,11 +2206,35 @@ async fn delete_published_layer(State(state): State<AppState>, Path(id): Path<St
     }
 }
 
-async fn list_catalog(State(state): State<AppState>) -> Response {
-    match state.catalog.list_items().await {
-        Ok(layers) => Json(layers).into_response(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+async fn list_catalog(State(state): State<AppState>, Query(query): Query<ListQuery>) -> Response {
+    let items = match state.catalog.list_items().await {
+        Ok(items) => items,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
+    let published = match state.catalog.list_published_layers().await {
+        Ok(published) => published,
+        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    };
+    let mut reference_counts = HashMap::new();
+    for layer in published {
+        *reference_counts
+            .entry(layer.catalog_item_id)
+            .or_insert(0usize) += 1;
     }
+    paged_list_response(
+        items
+            .into_iter()
+            .filter(|item| contains_query(&[&item.app_id, &item.catalog_path, &item.title], &query))
+            .map(|item| CatalogItemView {
+                reference_count: item
+                    .id
+                    .and_then(|id| reference_counts.get(&id).copied())
+                    .unwrap_or_default(),
+                item,
+            })
+            .collect(),
+        &query,
+    )
 }
 
 async fn preview_catalog_features(
@@ -1829,6 +2389,7 @@ async fn delete_catalog_item(State(state): State<AppState>, Path(id): Path<Strin
         Ok(id) => id,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
     };
+    clear_layers_using_catalog_item(&state, id).await;
     match state.catalog.delete_item(id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => api_message(StatusCode::NOT_FOUND, "catalog item not found"),
@@ -1919,6 +2480,7 @@ async fn wms(
                         })
                         .collect::<Vec<_>>();
                     (!layers.is_empty()).then_some(CapabilitiesGroup {
+                        name: group.name,
                         title: group.title,
                         abstract_text: group.description,
                         layers,
@@ -2001,6 +2563,13 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             return xml_exception(StatusCode::BAD_REQUEST, "InvalidDimensionValue", &error)
         }
     };
+    // OpenLayers ImageWMS sends physical image dimensions on HiDPI displays and,
+    // for MapServer-compatible requests, exposes the device scale through
+    // MAP_RESOLUTION (90 dpi at 1x). Keep scale selection based on CSS pixels,
+    // while still rendering the larger physical image with scaled symbolizers.
+    let pixel_ratio = wms_pixel_ratio(&parameters);
+    let logical_width = ((width as f32) / pixel_ratio).round().max(1.0) as u32;
+    let logical_height = ((height as f32) / pixel_ratio).round().max(1.0) as u32;
     let crs = match parameters.get("CRS").or_else(|| parameters.get("SRS")) {
         Some(crs) if !crs.trim().is_empty() => crs.clone(),
         _ => {
@@ -2071,6 +2640,84 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             )
         }
     };
+    let groups = match state.catalog.list_layer_groups().await {
+        Ok(groups) => groups,
+        Err(error) => {
+            return xml_exception(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                &error.to_string(),
+            )
+        }
+    };
+    if let Some(group) = groups
+        .into_iter()
+        .find(|group| group.enabled && group.name == layer_name)
+    {
+        let request_scale = scale_denominator(&crs, &bbox, logical_width, logical_height);
+        let mut rendered = Vec::new();
+        for member in &group.members {
+            let Some(layer) = layers
+                .iter()
+                .find(|layer| layer.enabled && layer.id == member.published_layer_id)
+            else {
+                continue;
+            };
+            if !layer.supported_crs.is_empty()
+                && !layer
+                    .supported_crs
+                    .iter()
+                    .any(|supported| supported.0.eq_ignore_ascii_case(&crs))
+            {
+                continue;
+            }
+            match render_group_member(
+                &state,
+                layer,
+                member,
+                crs.clone(),
+                bbox,
+                width,
+                height,
+                request_scale,
+                0,
+                pixel_ratio,
+            )
+            .await
+            {
+                Ok(Some(bytes)) => rendered.push((bytes, member.opacity)),
+                Ok(None) => {}
+                Err(error) => {
+                    return xml_exception(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "NoApplicableCode",
+                        &error,
+                    )
+                }
+            }
+        }
+        let background = if transparent {
+            [0, 0, 0, 0]
+        } else {
+            [255, 255, 255, 255]
+        };
+        return match compose_images(width, height, background, &rendered, image_format) {
+            Ok(image) => (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, image.content_type),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                image.bytes,
+            )
+                .into_response(),
+            Err(error) => xml_exception(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                &error,
+            ),
+        };
+    }
     let Some(layer) = layers
         .into_iter()
         .find(|layer| layer.enabled && layer.name == layer_name)
@@ -2093,7 +2740,7 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             "CRS is not enabled for this layer",
         );
     }
-    let request_scale = scale_denominator(&crs, &bbox, width, height);
+    let request_scale = scale_denominator(&crs, &bbox, logical_width, logical_height);
     if !scale_is_visible(
         layer.min_scale_denominator,
         layer.max_scale_denominator,
@@ -2137,7 +2784,7 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
     }
     let simplify_tolerance = configured_simplify_tolerance(
         layer.simplify_factor,
-        vector_resolution(&bbox, width, height),
+        vector_resolution(&bbox, logical_width, logical_height),
     );
     let item = match state.catalog.get_item(layer.catalog_item_id).await {
         Ok(Some(item)) => item,
@@ -2186,7 +2833,7 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
         .await;
     }
     let rendering_style = match vector_rendering_style(&state, &layer, transparent).await {
-        Ok(style) => style,
+        Ok(style) => scale_rendering_style(style, pixel_ratio),
         Err(error) => {
             return xml_exception(StatusCode::UNPROCESSABLE_ENTITY, "StyleNotDefined", &error)
         }
@@ -2204,8 +2851,8 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             format: image_format,
             nodata: Some(0.0),
         }),
-        SourceKind::Vector => vector_rasterizer
-            .render(&render_vector_request(
+        SourceKind::Vector => {
+            let mut request = render_vector_request(
                 source,
                 crs,
                 bbox,
@@ -2215,12 +2862,16 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
                 simplify_tolerance,
                 image_format,
                 rendering_style,
-            ))
-            .map(|image| cangling_gdal_core::RenderedImage {
-                bytes: image.bytes,
-                content_type: image.content_type,
-            })
-            .map_err(|error| cangling_gdal_core::GdalError::InvalidRequest(error.to_string())),
+            );
+            request.scale_denominator = request_scale;
+            vector_rasterizer
+                .render(&request)
+                .map(|image| cangling_gdal_core::RenderedImage {
+                    bytes: image.bytes,
+                    content_type: image.content_type,
+                })
+                .map_err(|error| cangling_gdal_core::GdalError::InvalidRequest(error.to_string()))
+        }
     })
     .await
     {
@@ -2244,6 +2895,135 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             &error.to_string(),
         ),
     }
+}
+
+fn wms_pixel_ratio(parameters: &HashMap<String, String>) -> f32 {
+    parameters
+        .get("PIXELRATIO")
+        .and_then(|value| value.parse::<f32>().ok())
+        .or_else(|| {
+            parameters
+                .get("MAP_RESOLUTION")
+                .and_then(|value| value.parse::<f32>().ok())
+                .map(|dpi| dpi / 90.0)
+        })
+        .filter(|ratio| ratio.is_finite())
+        .unwrap_or(1.0)
+        .clamp(1.0, 4.0)
+}
+
+async fn render_group_member(
+    state: &AppState,
+    layer: &PublishedLayer,
+    member: &LayerGroupMember,
+    target_crs: String,
+    bbox: GdalBoundingBox,
+    width: u32,
+    height: u32,
+    request_scale: f64,
+    buffer_pixels: u32,
+    symbol_scale: f32,
+) -> Result<Option<Vec<u8>>, String> {
+    let min_scale = member.min_scale_denominator.or(layer.min_scale_denominator);
+    let max_scale = member.max_scale_denominator.or(layer.max_scale_denominator);
+    if !scale_is_visible(min_scale, max_scale, request_scale) {
+        return Ok(None);
+    }
+    let style_id = member
+        .style_id
+        .as_deref()
+        .or(layer.default_style_id.as_deref());
+    let rendering_style = scale_rendering_style(
+        vector_rendering_style_with_id(state, style_id, true).await?,
+        symbol_scale,
+    );
+    if !rendering_style.rules.iter().any(|rule| {
+        scale_is_visible(
+            rule.minimum_scale_denominator,
+            rule.maximum_scale_denominator,
+            request_scale,
+        )
+    }) {
+        return Ok(None);
+    }
+    let item = state
+        .catalog
+        .get_item(layer.catalog_item_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("成员图层 `{}` 的目录项不存在", layer.name))?;
+    let path = item
+        .source_config
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("成员图层 `{}` 缺少数据源路径", layer.name))?;
+    let source = GdalDataSource {
+        path: path.into(),
+        layer: item
+            .source_config
+            .get("layer")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        encoding: item
+            .source_config
+            .get("encoding")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    if item.source_kind == SourceKind::Vector {
+        ensure_vector_source_prepared(
+            state,
+            path,
+            source.layer.as_deref(),
+            source.encoding.as_deref(),
+        )
+        .await;
+    }
+    let simplify = configured_simplify_tolerance(
+        member.simplify_factor.or(layer.simplify_factor),
+        vector_resolution(
+            &bbox,
+            ((width as f32) / symbol_scale).round().max(1.0) as u32,
+            ((height as f32) / symbol_scale).round().max(1.0) as u32,
+        ),
+    );
+    let source_kind = item.source_kind;
+    let vector_rasterizer = state.vector_rasterizer.clone();
+    tokio::task::spawn_blocking(move || match source_kind {
+        SourceKind::Raster => GdalEngine
+            .render(&RasterRenderRequest {
+                source,
+                target_crs,
+                bbox,
+                width,
+                height,
+                resampling: Resampling::Bilinear,
+                format: ImageFormat::Png,
+                nodata: Some(0.0),
+            })
+            .map(|image| Some(image.bytes))
+            .map_err(|error| error.to_string()),
+        SourceKind::Vector => {
+            let mut request = render_vector_request(
+                source,
+                target_crs,
+                bbox,
+                width,
+                height,
+                buffer_pixels,
+                simplify,
+                ImageFormat::Png,
+                rendering_style,
+            );
+            request.scale_denominator = request_scale;
+            vector_rasterizer
+                .render(&request)
+                .map(|image| Some(image.bytes))
+                .map_err(|error| error.to_string())
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 fn xml_exception(status: StatusCode, code: &str, message: &str) -> Response {
     (
@@ -2282,7 +3062,7 @@ async fn wmts(
                     )
                 }
             };
-            let layers = published
+            let mut layers = published
                 .into_iter()
                 .filter(|layer| layer.enabled)
                 .map(|layer| WmtsCapabilitiesLayer {
@@ -2290,6 +3070,22 @@ async fn wmts(
                     title: layer.title,
                 })
                 .collect::<Vec<_>>();
+            match state.catalog.list_layer_groups().await {
+                Ok(groups) => layers.extend(groups.into_iter().filter(|group| group.enabled).map(
+                    |group| WmtsCapabilitiesLayer {
+                        identifier: group.name,
+                        title: group.title,
+                    },
+                )),
+                Err(error) => {
+                    return wmts_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "NoApplicableCode",
+                        "",
+                        &error.to_string(),
+                    )
+                }
+            }
             let service_url = std::env::var("WMTS_PUBLIC_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000/wmts".into());
             (
@@ -2318,6 +3114,7 @@ async fn wmts(
 
 async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     let request_started = Instant::now();
+    let output_size = 256 * u32::from(tile.pixel_ratio);
     state.metrics.wmts_requests.fetch_add(1, Ordering::Relaxed);
     if tile.style != "default" {
         return wmts_error(
@@ -2338,6 +3135,23 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
             )
         }
     };
+    let groups = match state.catalog.list_layer_groups().await {
+        Ok(groups) => groups,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                "LAYER",
+                &error.to_string(),
+            )
+        }
+    };
+    if let Some(group) = groups
+        .into_iter()
+        .find(|group| group.enabled && group.name == tile.layer)
+    {
+        return serve_wmts_group_tile(state, tile, group, layers).await;
+    }
     let Some(layer) = layers
         .into_iter()
         .find(|layer| layer.enabled && layer.name == tile.layer)
@@ -2422,8 +3236,8 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
         request_scale,
     ) {
         return match blank_png(
-            256,
-            256,
+            output_size,
+            output_size,
             map_core::Rgba {
                 red: 0,
                 green: 0,
@@ -2442,21 +3256,22 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     }
     let simplify_tolerance =
         configured_simplify_tolerance(layer.simplify_factor, vector_resolution(&bbox, 256, 256));
+    let wmts_cache = active_wmts_cache(&state);
     let cache_key = WmtsCacheKey {
-        database: match &state.wmts_cache {
+        database: match &wmts_cache {
             WmtsCache::CanglingTile {
                 database_id: Some(id),
                 ..
             } => id.clone(),
             _ => sha256_hex(layer.app_id.as_bytes()),
         },
-        item: layer_cache_item_id(&layer),
+        item: pixel_ratio_cache_item(&layer_cache_item_id(&layer), tile.pixel_ratio),
         zoom: tile.zoom,
         col: tile.col,
         row: tile.row,
     };
     let cache_started = Instant::now();
-    match cache_get(&state.wmts_cache, &cache_key).await {
+    match cache_get(&wmts_cache, &cache_key).await {
         Ok(Some(bytes)) => {
             let cache_elapsed = cache_started.elapsed();
             state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -2498,7 +3313,7 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     let flight_wait_ms = flight_started.elapsed().as_secs_f64() * 1000.0;
     // Only one request for a cache key is allowed to render. Followers wait on
     // the keyed lock and consume the image written by the leader.
-    if let Ok(Some(bytes)) = cache_get(&state.wmts_cache, &cache_key).await {
+    if let Ok(Some(bytes)) = cache_get(&wmts_cache, &cache_key).await {
         state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
         state
             .metrics
@@ -2537,7 +3352,7 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     let queue_ms = permit_started.elapsed().as_secs_f64() * 1000.0;
     // A request for the same tile may have completed while this one waited in
     // the render queue. Recheck the shared cache to avoid duplicate GDAL work.
-    if let Ok(Some(bytes)) = cache_get(&state.wmts_cache, &cache_key).await {
+    if let Ok(Some(bytes)) = cache_get(&wmts_cache, &cache_key).await {
         state.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
         state
             .metrics
@@ -2583,6 +3398,7 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
             simplify_tolerance,
             rendering_style,
             vector_rasterizer.as_ref(),
+            tile.pixel_ratio,
         )
     })
     .await
@@ -2597,14 +3413,8 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
                 .fetch_add(render_micros, Ordering::Relaxed);
             let rendered_bytes = bytes.len();
             let cache_write_started = Instant::now();
-            if let Err(error) = cache_put(
-                &state.wmts_cache,
-                &cache_key,
-                &layer.app_id,
-                &layer.title,
-                &bytes,
-            )
-            .await
+            if let Err(error) =
+                cache_put(&wmts_cache, &cache_key, &layer.app_id, &layer.title, &bytes).await
             {
                 tracing::warn!(%error, "WMTS cache write failed; returning rendered tile");
             }
@@ -2669,6 +3479,172 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     }
 }
 
+async fn serve_wmts_group_tile(
+    state: AppState,
+    tile: TileRequest,
+    group: LayerGroup,
+    layers: Vec<PublishedLayer>,
+) -> Response {
+    let output_size = 256 * u32::from(tile.pixel_ratio);
+    let wmts_cache = active_wmts_cache(&state);
+    let styles = match state.catalog.list_styles().await {
+        Ok(styles) => styles,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                "LAYER",
+                &error.to_string(),
+            )
+        }
+    };
+    let bounds = match tile_bounds(tile.zoom, tile.row, tile.col) {
+        Ok(bounds) => bounds,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::BAD_REQUEST,
+                "TileOutOfRange",
+                "TILEMATRIX",
+                &error.to_string(),
+            )
+        }
+    };
+    let bbox = GdalBoundingBox {
+        min_x: bounds.min_x,
+        min_y: bounds.min_y,
+        max_x: bounds.max_x,
+        max_y: bounds.max_y,
+    };
+    let cache_key = WmtsCacheKey {
+        database: match &wmts_cache {
+            WmtsCache::CanglingTile {
+                database_id: Some(id),
+                ..
+            } => id.clone(),
+            _ => sha256_hex(group.app_id.as_bytes()),
+        },
+        item: pixel_ratio_cache_item(
+            &group_cache_item_id(&group, &layers, &styles),
+            tile.pixel_ratio,
+        ),
+        zoom: tile.zoom,
+        col: tile.col,
+        row: tile.row,
+    };
+    if let Ok(Some(bytes)) = cache_get(&wmts_cache, &cache_key).await {
+        return png_tile_response(bytes);
+    }
+    let flight = tile_flight(&state, &cache_key);
+    let _flight_guard = flight.lock().await;
+    if let Ok(Some(bytes)) = cache_get(&wmts_cache, &cache_key).await {
+        return png_tile_response(bytes);
+    }
+    let _permit = match state.render_limit.clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "NoApplicableCode",
+                "GetTile",
+                &format!("render queue is unavailable: {error}"),
+            )
+        }
+    };
+    let request_scale = scale_denominator("EPSG:3857", &bbox, 256, 256);
+    let mut rendered = Vec::new();
+    for member in &group.members {
+        let Some(layer) = layers
+            .iter()
+            .find(|layer| layer.enabled && layer.id == member.published_layer_id)
+        else {
+            continue;
+        };
+        match render_group_member(
+            &state,
+            layer,
+            member,
+            "EPSG:3857".into(),
+            bbox,
+            output_size,
+            output_size,
+            request_scale,
+            2 * u32::from(tile.pixel_ratio),
+            f32::from(tile.pixel_ratio),
+        )
+        .await
+        {
+            Ok(Some(bytes)) => rendered.push((bytes, member.opacity)),
+            Ok(None) => {}
+            Err(error) => {
+                return wmts_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "NoApplicableCode",
+                    "GetTile",
+                    &error,
+                )
+            }
+        }
+    }
+    let bytes = match compose_images(
+        output_size,
+        output_size,
+        [0, 0, 0, 0],
+        &rendered,
+        ImageFormat::Png,
+    ) {
+        Ok(image) => image.bytes,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                "GetTile",
+                &error,
+            )
+        }
+    };
+    if let Err(error) =
+        cache_put(&wmts_cache, &cache_key, &group.app_id, &group.title, &bytes).await
+    {
+        tracing::warn!(%error, group = %group.name, "WMTS group cache write failed");
+    }
+    png_tile_response(bytes)
+}
+
+fn group_cache_item_id(
+    group: &LayerGroup,
+    layers: &[PublishedLayer],
+    styles: &[StyleRecord],
+) -> String {
+    let mut identity = format!("{}:{}", group.id, group.enabled);
+    for member in &group.members {
+        let layer_identity = layers
+            .iter()
+            .find(|layer| layer.id == member.published_layer_id)
+            .map(layer_cache_item_id)
+            .unwrap_or_default();
+        identity.push_str(&format!(
+            "|{}:{}:{:?}:{:?}:{:?}:{}",
+            member.published_layer_id,
+            member.style_id.as_deref().unwrap_or(""),
+            member.min_scale_denominator,
+            member.max_scale_denominator,
+            member.simplify_factor,
+            member.opacity
+        ));
+        identity.push_str(&layer_identity);
+        let style_id = member.style_id.as_deref().or_else(|| {
+            layers
+                .iter()
+                .find(|layer| layer.id == member.published_layer_id)
+                .and_then(|layer| layer.default_style_id.as_deref())
+        });
+        if let Some(style) = style_id.and_then(|id| styles.iter().find(|style| style.id == id)) {
+            identity.push_str(&format!("@{}:{}", style.revision, style.content_hash));
+        }
+    }
+    sha256_hex(identity.as_bytes())
+}
+
 async fn ensure_vector_source_prepared(
     state: &AppState,
     source_path: &str,
@@ -2718,7 +3694,10 @@ fn render_wmts_tile(
     simplify_tolerance: Option<f64>,
     rendering_style: VectorRenderingStyle,
     vector_rasterizer: &dyn VectorRasterizer,
+    pixel_ratio: u8,
 ) -> Result<Vec<u8>, String> {
+    let output_size = 256 * u32::from(pixel_ratio);
+    let rendering_style = scale_rendering_style(rendering_style, f32::from(pixel_ratio));
     let source = GdalDataSource {
         path: source_path.into(),
         layer: source_layer.map(str::to_owned),
@@ -2735,8 +3714,8 @@ fn render_wmts_tile(
             source,
             target_crs: "EPSG:3857".into(),
             bbox,
-            width: 256,
-            height: 256,
+            width: output_size,
+            height: output_size,
             resampling: Resampling::Bilinear,
             format: ImageFormat::Png,
             nodata: Some(0.0),
@@ -2746,9 +3725,9 @@ fn render_wmts_tile(
                 source,
                 "EPSG:3857".into(),
                 bbox,
-                256,
-                256,
-                2,
+                output_size,
+                output_size,
+                2 * u32::from(pixel_ratio),
                 simplify_tolerance,
                 ImageFormat::Png,
                 rendering_style,

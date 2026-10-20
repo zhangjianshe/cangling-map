@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/cangling-gdal-core",
     "crates/ogc-wms",
     "crates/ogc-wmts",
     "crates/map-core",
@@ -26,6 +27,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 image = "0.25"
+tiny-skia = "0.11"
 quick-xml = { version = "0.38", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,8 +37,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
+rustybuzz = "0.20"
+ttf-parser = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "=1.18.1", features = ["serde"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Workspace crates deny unsafe by default. The embedded GDAL FFI module opts in
+# locally because calls through gdal-sys necessarily cross an unsafe boundary.
+unsafe_code = "deny"

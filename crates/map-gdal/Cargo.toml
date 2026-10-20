@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-cangling-gdal-core = { path = "../../../cangling-gdal/crates/cangling-gdal-core" }
+cangling-gdal-core = { path = "../cangling-gdal-core" }
 map-core = { path = "../map-core" }
 map-render = { path = "../map-render" }
 map-style = { path = "../map-style" }

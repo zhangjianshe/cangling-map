@@ -399,6 +399,32 @@ impl SqliteCatalog {
         sqlx::migrate!().run(&pool).await?;
         Ok(Self { pool })
     }
+    pub async fn get_setting(&self, key: &str) -> Result<Option<Value>, CatalogError> {
+        let value =
+            sqlx::query_scalar::<_, String>("SELECT value FROM system_settings WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        value
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(CatalogError::from)
+    }
+    pub async fn put_setting(&self, key: &str, value: &Value) -> Result<(), CatalogError> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(CatalogError::InvalidData("setting key is empty".into()));
+        }
+        sqlx::query(
+            "INSERT INTO system_settings(key,value,updated_at) VALUES(?,?,CURRENT_TIMESTAMP) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",
+        )
+        .bind(key)
+        .bind(serde_json::to_string(value)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
     fn hydrate(row: ItemRow) -> Result<CatalogItem, CatalogError> {
         Ok(CatalogItem {
             id: Some(row.id.parse()?),
@@ -523,12 +549,26 @@ impl Catalog for SqliteCatalog {
             .ok_or_else(|| CatalogError::NotFound(id.to_string()))
     }
     async fn delete_item(&self, id: CatalogItemId) -> Result<bool, CatalogError> {
-        Ok(sqlx::query("DELETE FROM catalog_items WHERE id=?")
-            .bind(id.to_string())
-            .execute(&self.pool)
+        let id = id.to_string();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM layer_group_members WHERE published_layer_id IN (SELECT id FROM published_layers WHERE catalog_item_id=?)",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM published_layers WHERE catalog_item_id=?")
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = sqlx::query("DELETE FROM catalog_items WHERE id=?")
+            .bind(&id)
+            .execute(&mut *tx)
             .await?
             .rows_affected()
-            == 1)
+            == 1;
+        tx.commit().await?;
+        Ok(deleted)
     }
 }
 
@@ -609,6 +649,16 @@ impl PublicationStore for SqliteCatalog {
                 .is_none()
             {
                 return Err(CatalogError::NotFound(member.published_layer_id.clone()));
+            }
+            if !member.opacity.is_finite() || !(0.0..=1.0).contains(&member.opacity) {
+                return Err(CatalogError::InvalidData(
+                    "图层组成员透明度必须位于 0 到 1 之间".into(),
+                ));
+            }
+            if let Some(style_id) = member.style_id.as_deref() {
+                if self.get_style(style_id).await?.is_none() {
+                    return Err(CatalogError::NotFound(style_id.to_owned()));
+                }
             }
         }
         let mut tx = self.pool.begin().await?;
@@ -816,6 +866,18 @@ fn hydrate_style(row: StyleRow) -> Result<StyleRecord, CatalogError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn stores_system_settings() {
+        let store = SqliteCatalog::in_memory().await.unwrap();
+        assert_eq!(store.get_setting("cache_service").await.unwrap(), None);
+        let value = json!({"enabled": true, "base_url": "http://tile:7601"});
+        store.put_setting("cache_service", &value).await.unwrap();
+        assert_eq!(
+            store.get_setting("cache_service").await.unwrap(),
+            Some(value)
+        );
+    }
     fn item() -> CatalogItem {
         CatalogItem {
             id: None,
@@ -1002,5 +1064,46 @@ mod tests {
         assert_eq!(groups[0].members[0].simplify_factor, Some(0.75));
         assert_eq!(groups[0].members[0].published_layer_id, layer.id);
         assert_eq!(groups[0].members[0].position, 10);
+    }
+
+    #[tokio::test]
+    async fn deleting_catalog_item_removes_published_layers_and_group_members() {
+        let store = SqliteCatalog::in_memory().await.unwrap();
+        let catalog = store.put_item(&item()).await.unwrap();
+        let catalog_id = catalog.id.unwrap();
+        let layer = store
+            .put_published_layer(&PublishedLayer {
+                id: String::new(),
+                app_id: "cis".into(),
+                name: "terrain".into(),
+                title: "区域地形".into(),
+                description: None,
+                catalog_item_id: catalog_id,
+                default_style_id: None,
+                supported_crs: vec![],
+                min_scale_denominator: None,
+                max_scale_denominator: None,
+                simplify_factor: None,
+                queryable: false,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO layer_groups(id,app_id,name,title,enabled) VALUES('base','cis','base','基础数据',1)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO layer_group_members(group_id,published_layer_id,position,opacity) VALUES('base',?,0,1.0)")
+            .bind(&layer.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert!(store.delete_item(catalog_id).await.unwrap());
+        assert!(store.get_item(catalog_id).await.unwrap().is_none());
+        assert!(store.list_published_layers().await.unwrap().is_empty());
+        let groups = store.list_layer_groups().await.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].members.is_empty());
     }
 }

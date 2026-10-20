@@ -1,0 +1,9 @@
+.git
+.github
+target
+catalog.db
+wmts-cache
+vector-projection-cache
+dist
+*.tar
+*.tar.gz

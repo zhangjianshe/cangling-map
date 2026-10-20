@@ -1,0 +1,315 @@
+{
+  "schema_version": 1,
+  "exported_at": "2026-10-20T03:58:55Z",
+  "application": "ai",
+  "catalog": [
+    {
+      "key": "5f7c52aa-6614-8edb-8d72-cc08f25c6c0b",
+      "app_id": "ai",
+      "catalog_path": "/china/shape_china_xz",
+      "title": "中国行政区面",
+      "description": "导入自 GeoServer ai:china",
+      "source_kind": "vector",
+      "source_config": {
+        "encoding": "UTF-8"
+      },
+      "data_file": "shape_china_xz.shp",
+      "native_crs": "EPSG:4326",
+      "native_extent": {
+        "min_x": 73.502355,
+        "min_y": 3.8378885547,
+        "max_x": 135.0882910038,
+        "max_y": 53.5619170437
+      },
+      "attribution": null
+    },
+    {
+      "key": "cd1cc601-66f7-8beb-a9ce-91d24a7e0e8a",
+      "app_id": "ai",
+      "catalog_path": "/china/shape_nanhai_line",
+      "title": "中国南海线",
+      "description": "导入自 GeoServer ai:china",
+      "source_kind": "vector",
+      "source_config": {
+        "encoding": "GB2312"
+      },
+      "data_file": "shape_nanhai_line.shp",
+      "native_crs": "EPSG:4326",
+      "native_extent": {
+        "min_x": 108.2361737673,
+        "min_y": 3.5170545275,
+        "max_x": 121.4902585164,
+        "max_y": 22.6254095064
+      },
+      "attribution": null
+    },
+    {
+      "key": "67080984-8c10-8535-9e83-63ad3cff8967",
+      "app_id": "ai",
+      "catalog_path": "/china/sheng201912",
+      "title": "中国省级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "source_kind": "vector",
+      "source_config": {
+        "encoding": "GB2312"
+      },
+      "data_file": "sheng201912.shp",
+      "native_crs": "EPSG:4326",
+      "native_extent": {
+        "min_x": 73.5011421,
+        "min_y": 6.323420775,
+        "max_x": 135.08851148,
+        "max_y": 53.56090105
+      },
+      "attribution": null
+    },
+    {
+      "key": "9430ff38-3649-8615-8b94-3b633be7c9fa",
+      "app_id": "ai",
+      "catalog_path": "/china/shi201912",
+      "title": "中国市级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "source_kind": "vector",
+      "source_config": {
+        "encoding": "GB2312"
+      },
+      "data_file": "shi201912.shp",
+      "native_crs": "EPSG:4326",
+      "native_extent": {
+        "min_x": 73.5011421,
+        "min_y": 6.323420775,
+        "max_x": 135.08851148,
+        "max_y": 53.56090105
+      },
+      "attribution": null
+    },
+    {
+      "key": "94ebcd46-eb7d-823b-a45d-ab15b3995cd0",
+      "app_id": "ai",
+      "catalog_path": "/china/xian201912",
+      "title": "中国县级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "source_kind": "vector",
+      "source_config": {
+        "encoding": "GB2312"
+      },
+      "data_file": "xian201912.shp",
+      "native_crs": "EPSG:4326",
+      "native_extent": {
+        "min_x": 73.5011421,
+        "min_y": 6.323420775,
+        "max_x": 135.08851148,
+        "max_y": 53.56090105
+      },
+      "attribution": null
+    }
+  ],
+  "styles": [
+    {
+      "key": "560498d7-033a-8054-a140-157cfefa24f1",
+      "app_id": "ai",
+      "name": "style_china_base",
+      "title": "中国行政区底图",
+      "description": "ai:china 分级底图：仅提供低饱和面填充，边界由分级图层绘制",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "* { fill: #f3f6f2; fill-opacity: 1; }"
+    },
+    {
+      "key": "9a52a91e-3e71-87de-839e-14cb1c2e9107",
+      "app_id": "ai",
+      "name": "style_nanhai",
+      "title": "中国南海线",
+      "description": "转换自 GeoServer style_nanhai.sld；针对地图预览优化线宽",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "* {\n  stroke: #303030;\n  stroke-width: 1.5px;\n}"
+    },
+    {
+      "key": "e4f12a46-4f48-8d7e-be62-62f998b356e0",
+      "app_id": "ai",
+      "name": "style_sheng",
+      "title": "中国省级边界",
+      "description": "中国行政区划图层组的白色连续底面、省界与粗体省名样式；Z1-Z5 隐藏省名，Z8 起按省域范围重复",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "*[@scale >= 12000000] { fill: #ffffff; fill-opacity: 1; stroke: #315b4a; stroke-width: 1.2px; }\n*[@scale >= 8000000][@scale < 12000000] { fill: #ffffff; fill-opacity: 1; stroke: #667a70; stroke-width: 0.8px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 14px; font-weight: bold; font-fill: #203a30; halo-color: #ffffff; halo-radius: 2px; label-spacing: 22px; label-repeat-distance: 240px; }\n*[@scale >= 3000000][@scale < 8000000] { fill: #ffffff; fill-opacity: 1; stroke: #7f9088; stroke-width: 0.5px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 13px; font-weight: bold; font-fill: #203a30; halo-color: #ffffff; halo-radius: 2px; label-spacing: 24px; label-repeat-distance: 240px; }\n*[@scale >= 750000][@scale < 3000000] { fill: #ffffff; fill-opacity: 1; stroke: #315b4a; stroke-width: 1.2px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 15px; font-weight: bold; font-fill: #203a30; halo-color: #e8f0eb; halo-radius: 3px; label-spacing: 36px; label-repeat-distance: 420px; label-repeat-count: 24; }\n*[@scale < 750000] { fill: #ffffff; fill-opacity: 1; stroke: #315b4a; stroke-width: 1.2px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 16px; font-weight: bold; font-fill: #203a30; halo-color: #e8f0eb; halo-radius: 3px; label-spacing: 40px; label-repeat-distance: 520px; label-repeat-count: 32; }"
+    },
+    {
+      "key": "e9148522-1bc5-8296-aa2a-ab027c3afaa8",
+      "app_id": "ai",
+      "name": "style_shi",
+      "title": "中国市级边界",
+      "description": "ai:china 分级市界：Z9 市名加粗，Z10 市名加粗并带 halo",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "*[@scale >= 8000000][@scale < 12000000] { stroke: #a1aca7; stroke-opacity: 0.4; stroke-width: 0.55px; }\n*[@scale >= 3500000][@scale < 8000000] { stroke: #8f9d97; stroke-opacity: 0.8; stroke-width: 0.65px; label: [Name]; font-family: \"Noto Sans CJK SC\"; font-size: 11px; font-fill: #364b42; halo-color: #ffffff; halo-radius: 2px; label-spacing: 22px; label-repeat-distance: 210px; }\n*[@scale >= 1500000][@scale < 3500000] { stroke: #71847b; stroke-opacity: 0.9; stroke-width: 0.9px; label: [Name]; font-family: \"Noto Sans CJK SC\"; font-size: 12px; font-fill: #30473d; halo-color: #ffffff; halo-radius: 2px; label-spacing: 24px; label-repeat-distance: 190px; }\n*[@scale >= 750000][@scale < 1500000] { stroke: #71847b; stroke-opacity: 0.9; stroke-width: 0.9px; label: [Name]; font-family: \"Noto Sans CJK SC\"; font-size: 12px; font-weight: bold; font-fill: #30473d; label-spacing: 28px; label-repeat-distance: 190px; }\n*[@scale >= 375000][@scale < 750000] { stroke: #71847b; stroke-opacity: 0.9; stroke-width: 0.9px; label: [Name]; font-family: \"Noto Sans CJK SC\"; font-size: 13px; font-weight: bold; font-fill: #30473d; halo-color: #e8f0eb; halo-radius: 3px; label-spacing: 30px; label-repeat-distance: 190px; }\n*[@scale < 375000] { stroke: #71847b; stroke-opacity: 0.85; stroke-width: 0.9px; }\n/* renderer-anchor: area-centroid-v1 */"
+    },
+    {
+      "key": "70fd5cb0-5f62-833d-a8c4-27d39eac78fc",
+      "app_id": "ai",
+      "name": "style_xian",
+      "title": "中国县级边界",
+      "description": "县级行政区边界：Z10 显示常规字重县区名称，更高层级使用加粗名称",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "*[@scale >= 750000][@scale < 1500000] { stroke: #b2bbb7; stroke-opacity: 0.75; stroke-width: 0.6px; }\n*[@scale >= 375000][@scale < 750000] { stroke: #a3afa9; stroke-opacity: 0.85; stroke-width: 0.7px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 13px; font-fill: #30443b; halo-color: #ffffff; halo-radius: 1.2px; label-spacing: 32px; label-repeat-distance: 180px; label-repeat-count: 4; }\n*[@scale >= 250000][@scale < 375000] { stroke: #a3afa9; stroke-opacity: 0.85; stroke-width: 0.7px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 13px; font-weight: bold; font-fill: #30443b; halo-color: #ffffff; halo-radius: 1.2px; label-spacing: 32px; label-repeat-distance: 180px; label-repeat-count: 4; }\n*[@scale < 250000] { stroke: #9ca9a3; stroke-opacity: 0.9; stroke-width: 0.8px; label: [NAME]; font-family: \"Noto Sans CJK SC\"; font-size: 14px; font-weight: bold; font-fill: #263b32; halo-color: #ffffff; halo-radius: 1.2px; label-spacing: 36px; label-repeat-distance: 170px; label-repeat-count: 4; }"
+    },
+    {
+      "key": "e7a14eca-5713-877f-814b-5afe1acbc30e",
+      "app_id": "ai",
+      "name": "style_xiangzhen",
+      "title": "中国乡镇边界",
+      "description": "使用虚线表示乡镇边界，并以斜体显示乡镇名称",
+      "geometry_type": "polygon",
+      "source_format": "geocss",
+      "source_text": "*[@scale >= 250000][@scale < 750000] { stroke: #aeb9b4; stroke-opacity: 0.82; stroke-width: 0.65px; stroke-dasharray: 3px 3px; label: [name]; font-family: \"Noto Sans CJK SC\"; font-size: 10px; font-style: italic; font-fill: #69756f; halo-color: #ffffff; halo-radius: 2px; label-spacing: 42px; label-min-area: 700px; label-repeat-distance: 160px; }\n*[@scale < 250000] { stroke: #9facA6; stroke-opacity: 0.9; stroke-width: 0.75px; stroke-dasharray: 4px 3px; label: [name]; font-family: \"Noto Sans CJK SC\"; font-size: 11px; font-style: italic; font-fill: #56645e; halo-color: #ffffff; halo-radius: 2px; label-spacing: 38px; label-min-area: 500px; label-repeat-distance: 150px; }"
+    }
+  ],
+  "layers": [
+    {
+      "key": "930ebacc-7023-8c50-a92a-34a0523c18c0",
+      "app_id": "ai",
+      "name": "shape_china_xz",
+      "title": "中国行政区面",
+      "description": "导入自 GeoServer ai:china",
+      "catalog_key": "5f7c52aa-6614-8edb-8d72-cc08f25c6c0b",
+      "default_style_key": "560498d7-033a-8054-a140-157cfefa24f1",
+      "supported_crs": [
+        "EPSG:3857",
+        "EPSG:4326"
+      ],
+      "min_scale_denominator": null,
+      "max_scale_denominator": null,
+      "simplify_factor": 0.35,
+      "queryable": true,
+      "enabled": true
+    },
+    {
+      "key": "4a0b8f6c-43a2-8abe-8c30-ed3b3905f8e4",
+      "app_id": "ai",
+      "name": "shape_nanhai_line",
+      "title": "中国南海线",
+      "description": "导入自 GeoServer ai:china",
+      "catalog_key": "cd1cc601-66f7-8beb-a9ce-91d24a7e0e8a",
+      "default_style_key": "9a52a91e-3e71-87de-839e-14cb1c2e9107",
+      "supported_crs": [
+        "EPSG:3857",
+        "EPSG:4326"
+      ],
+      "min_scale_denominator": null,
+      "max_scale_denominator": null,
+      "simplify_factor": 0.35,
+      "queryable": true,
+      "enabled": true
+    },
+    {
+      "key": "ee90f2ed-6cc1-884b-97ca-0f075c5caba1",
+      "app_id": "ai",
+      "name": "sheng201912",
+      "title": "中国省级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "catalog_key": "67080984-8c10-8535-9e83-63ad3cff8967",
+      "default_style_key": "e4f12a46-4f48-8d7e-be62-62f998b356e0",
+      "supported_crs": [
+        "EPSG:3857",
+        "EPSG:4326"
+      ],
+      "min_scale_denominator": null,
+      "max_scale_denominator": null,
+      "simplify_factor": 0.35,
+      "queryable": true,
+      "enabled": true
+    },
+    {
+      "key": "137b6276-ef6f-8282-b000-b7f2c5b0fcd3",
+      "app_id": "ai",
+      "name": "shi201912",
+      "title": "中国市级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "catalog_key": "9430ff38-3649-8615-8b94-3b633be7c9fa",
+      "default_style_key": "e9148522-1bc5-8296-aa2a-ab027c3afaa8",
+      "supported_crs": [
+        "EPSG:3857",
+        "EPSG:4326"
+      ],
+      "min_scale_denominator": null,
+      "max_scale_denominator": null,
+      "simplify_factor": 0.35,
+      "queryable": true,
+      "enabled": true
+    },
+    {
+      "key": "adad47e4-d252-8ab6-86d3-6d7775ca0d4c",
+      "app_id": "ai",
+      "name": "xian201912",
+      "title": "中国县级行政区",
+      "description": "导入自 GeoServer ai:china",
+      "catalog_key": "94ebcd46-eb7d-823b-a45d-ab15b3995cd0",
+      "default_style_key": "70fd5cb0-5f62-833d-a8c4-27d39eac78fc",
+      "supported_crs": [
+        "EPSG:3857",
+        "EPSG:4326"
+      ],
+      "min_scale_denominator": null,
+      "max_scale_denominator": null,
+      "simplify_factor": 0.35,
+      "queryable": true,
+      "enabled": true
+    }
+  ],
+  "group": {
+    "app_id": "ai",
+    "name": "china",
+    "title": "中国行政区划",
+    "description": "全国—省—市—县—乡镇分级显示的中国行政区划组合图层",
+    "enabled": true,
+    "members": [
+      {
+        "layer_key": "ee90f2ed-6cc1-884b-97ca-0f075c5caba1",
+        "style_key": "e4f12a46-4f48-8d7e-be62-62f998b356e0",
+        "position": 0,
+        "opacity": 1.0,
+        "min_scale_denominator": null,
+        "max_scale_denominator": null,
+        "simplify_factor": 0.4
+      },
+      {
+        "layer_key": "adad47e4-d252-8ab6-86d3-6d7775ca0d4c",
+        "style_key": "70fd5cb0-5f62-833d-a8c4-27d39eac78fc",
+        "position": 1,
+        "opacity": 1.0,
+        "min_scale_denominator": null,
+        "max_scale_denominator": 1500000.0,
+        "simplify_factor": 0.35
+      },
+      {
+        "layer_key": "137b6276-ef6f-8282-b000-b7f2c5b0fcd3",
+        "style_key": "e9148522-1bc5-8296-aa2a-ab027c3afaa8",
+        "position": 2,
+        "opacity": 1.0,
+        "min_scale_denominator": null,
+        "max_scale_denominator": 12000000.0,
+        "simplify_factor": 0.35
+      },
+      {
+        "layer_key": "930ebacc-7023-8c50-a92a-34a0523c18c0",
+        "style_key": "e7a14eca-5713-877f-814b-5afe1acbc30e",
+        "position": 3,
+        "opacity": 1.0,
+        "min_scale_denominator": null,
+        "max_scale_denominator": 375000.0,
+        "simplify_factor": 0.25
+      },
+      {
+        "layer_key": "4a0b8f6c-43a2-8abe-8c30-ed3b3905f8e4",
+        "style_key": "9a52a91e-3e71-87de-839e-14cb1c2e9107",
+        "position": 4,
+        "opacity": 1.0,
+        "min_scale_denominator": null,
+        "max_scale_denominator": null,
+        "simplify_factor": 0.2
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "cangling-gdal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
+gdal-sys = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf", features = ["bindgen"] }
+image.workspace = true
+tiny-skia.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustybuzz.workspace = true
+ttf-parser.workspace = true
+sha2.workspace = true
+
+[lints]
+workspace = true

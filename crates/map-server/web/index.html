@@ -1,5 +1,259 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>数据目录 · Cangling Map</title><link rel="stylesheet" href="/assets/styles.css"></head><body>
-<aside><a class="brand" href="/"><i>◇</i><span><b>Cangling</b><small>地图服务</small></span></a><nav><a class="active" href="/">▦ 数据目录</a><a href="/published-layers">◫ 发布图层</a><a href="/styles">◒ 样式管理</a><a href="/layer-groups">⊞ 图层组</a><label>资源</label><a href="/style-assets">▧ 图片资源</a><label>服务</label><a href="/metrics">⌁ 指标</a><a href="/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0">◎ WMS 服务</a><a href="/wmts?SERVICE=WMTS&REQUEST=GetCapabilities&VERSION=1.0.0">▦ WMTS 服务</a></nav><footer><em></em><span><b>服务运行中</b><small>SQLite 目录库</small></span></footer></aside>
-<main><header><div><label>数据资产中心</label><h1>数据目录</h1><p>管理地图服务可读取的数据资产；发布图层与样式独立维护。</p></div><button class="primary add">＋ 添加目录项</button></header><section class="panel"><div class="toolbar"><div class="search"><span class="search-icon" aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索标题、路径或坐标系…"></div><span id="summary">正在加载目录…</span></div><div id="loading" class="state"><i class="spinner"></i>正在加载目录</div><div id="error" class="state hidden"><i class="state-icon bad">!</i><h2>无法加载数据目录</h2><p id="error-text"></p><button id="retry">重试</button></div><div id="empty" class="state hidden"><i class="state-icon">◇</i><h2>数据目录为空</h2><p>先添加栅格或矢量数据资产，之后再通过发布配置提供给 WMS。</p><button class="primary add">添加第一个目录项</button></div><div id="list" class="hidden"><table><thead><tr><th>数据资产</th><th>数据类型</th><th>原生坐标系</th><th>空间范围</th><th></th></tr></thead><tbody id="rows"></tbody></table><div id="cards"></div><div id="none" class="none hidden">没有符合搜索条件的目录项。</div></div></section></main>
-<dialog id="editor"><form id="form" method="dialog"><div class="dialog-head"><div><label id="kicker">新增数据资产</label><h2 id="form-title">添加目录项</h2></div><button value="cancel" class="close" aria-label="关闭">×</button></div><div class="dialog-body"><fieldset><legend>标识信息</legend><p>用于唯一定位该数据资产的稳定标识。</p><div class="grid"><label>应用 ID<input name="app_id" required placeholder="cis"><small>拥有该数据资产的应用命名空间。</small></label><label>目录路径<input name="catalog_path" required placeholder="/rasters/terrain"><small>应用内唯一的逻辑路径。</small></label><label class="wide">显示标题<input name="title" required placeholder="区域地形"><small>便于识别的数据资产标题。</small></label></div></fieldset><fieldset><legend>数据源</legend><p>配置服务器定位并解析数据的方式。</p><div class="grid"><label>数据类型<select name="source_kind"><option value="raster">栅格</option><option value="vector">矢量</option></select></label><label>原生坐标系<input name="native_crs" required value="EPSG:4326"></label><label class="wide">数据源配置（JSON）<textarea name="source_config" required rows="3">{"path":"/data/terrain.tif"}</textarea></label></div></fieldset><fieldset><legend>原生空间范围</legend><p>使用原生坐标系表示的边界框。</p><div class="extent"><label>最小 X<input name="min_x" required type="number" step="any"></label><label>最小 Y<input name="min_y" required type="number" step="any"></label><label>最大 X<input name="max_x" required type="number" step="any"></label><label>最大 Y<input name="max_y" required type="number" step="any"></label></div></fieldset><fieldset><div class="grid"><label class="wide">描述<textarea name="description" rows="2"></textarea></label><label class="wide">数据署名<input name="attribution" placeholder="© 数据提供方"></label></div></fieldset><div id="form-error" class="form-error hidden"></div></div><div class="dialog-actions"><button value="cancel">取消</button><button class="primary" id="save" type="button">保存目录项</button></div></form></dialog>
-<dialog id="confirm"><form method="dialog"><i class="state-icon bad">!</i><h2>删除目录项？</h2><p>此操作将永久删除数据资产 <b id="delete-name"></b>。已被发布图层引用的资产不能删除。</p><div><button value="cancel">取消</button><button class="danger" id="delete" type="button">确认删除</button></div></form></dialog><div id="toast"></div><script src="/assets/app.js" defer></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数据目录 · Cangling Map</title>
+<link rel="stylesheet" href="/assets/styles.css">
+<style>
+.quick-publish-button{min-height:32px;padding:5px 11px;border-color:#cfe8dd;color:#187a59;background:#f3fbf7;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700}.quick-publish-button:hover{background:#e7f6ee;border-color:#9fd3bc}.quick-publish-button svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.reference-count{display:inline-grid;place-items:center;min-width:30px;height:26px;padding:0 8px;border-radius:999px;background:#f1f4f3;color:#788480;font-style:normal;font-size:13px;font-weight:700}.reference-count.referenced{background:#e7f6ee;color:#187a59}.quick-publish-editor{width:min(820px,calc(100vw - 48px))}.quick-publish-editor .dialog-body{padding:20px 24px}.quick-publish-editor .published-tab-panel{display:block}
+</style>
+</head>
+<body>
+<aside>
+<a class="brand" href="/">
+<i>◇</i>
+<span>
+<b>Cangling</b>
+<small>地图服务</small>
+</span>
+</a>
+<nav>
+<label>数据</label>
+<a class="active" href="/catalog">▦ 数据目录</a>
+<a href="/styles">◒ 样式管理</a>
+<a href="/style-assets">▧ 图片资源</a>
+<label>发布配置</label>
+<a href="/published-layers">◫ 发布图层</a>
+<a href="/layer-groups">⊞ 图层组</a>
+<label>设置</label>
+<a href="/settings/cache">⚙ 缓存服务</a>
+<label>服务</label>
+<a href="/metrics">⌁ 指标</a>
+<a href="/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.0">◎ WMS 服务</a>
+<a href="/wmts?SERVICE=WMTS&REQUEST=GetCapabilities&VERSION=1.0.0">▦ WMTS 服务</a>
+</nav>
+<footer>
+<em>
+</em>
+<span>
+<b>服务运行中</b>
+<small>SQLite 目录库</small>
+</span>
+</footer>
+</aside>
+<main>
+<header>
+<div>
+<label>数据资产中心</label>
+<h1>数据目录</h1>
+<p>管理地图服务可读取的数据资产；发布图层与样式独立维护。</p>
+</div>
+<button class="primary add">＋ 添加目录项</button>
+</header>
+<section class="panel">
+<div class="toolbar">
+<div class="search">
+<span class="search-icon" aria-hidden="true">⌕</span>
+<input id="search" type="search" placeholder="搜索标题、路径或坐标系…">
+</div>
+<span id="summary">正在加载目录…</span>
+</div>
+<div id="loading" class="state">
+<i class="spinner">
+</i>正在加载目录</div>
+<div id="error" class="state hidden">
+<i class="state-icon bad">!</i>
+<h2>无法加载数据目录</h2>
+<p id="error-text">
+</p>
+<button id="retry">重试</button>
+</div>
+<div id="empty" class="state hidden">
+<i class="state-icon">◇</i>
+<h2>数据目录为空</h2>
+<p>先添加栅格或矢量数据资产，之后再通过发布配置提供给 WMS。</p>
+<button class="primary add">添加第一个目录项</button>
+</div>
+<div id="list" class="hidden">
+<table>
+<thead>
+<tr>
+<th>数据资产</th>
+<th>数据类型</th>
+<th>原生坐标系</th>
+<th>空间范围</th>
+<th>被引用次数</th>
+<th>发布图层</th>
+<th>
+</th>
+</tr>
+</thead>
+<tbody id="rows">
+</tbody>
+</table>
+<div id="cards">
+</div>
+<div id="none" class="none hidden">没有符合搜索条件的目录项。</div>
+</div>
+</section>
+</main>
+<dialog id="editor" class="catalog-editor">
+<form id="form" method="dialog">
+<div class="dialog-head">
+<div>
+<label id="kicker">新增数据资产</label>
+<h2 id="form-title">添加目录项</h2>
+</div>
+<button value="cancel" class="close" aria-label="关闭">×</button>
+</div>
+<div class="editor-tabs" role="tablist" aria-label="目录项配置">
+<button class="editor-tab active" type="button" role="tab" data-catalog-tab="basic" aria-selected="true">基础信息</button>
+<button class="editor-tab" type="button" role="tab" data-catalog-tab="source" aria-selected="false">数据源与空间范围</button>
+</div>
+<div class="dialog-body" data-active-tab="basic">
+<section class="catalog-tab-panel" data-catalog-panel="basic">
+<div class="catalog-section-head">
+<div>
+<h3>目录标识</h3>
+<p>用于在应用中稳定定位该数据资产。</p>
+</div>
+<span>必填</span>
+</div>
+<div class="grid">
+<label>应用 ID<input name="app_id" required placeholder="cis">
+<small>数据资产所属的应用命名空间。</small>
+</label>
+<label>内部逻辑路径<input name="catalog_path" required placeholder="/rasters/terrain">
+<small>可自定义，不必与磁盘位置一致。</small>
+</label>
+<label class="wide">显示标题<input name="title" required placeholder="区域地形">
+<small>用于目录、图层发布和选择器中的显示名称。</small>
+</label>
+<label class="wide">描述<textarea name="description" rows="5" placeholder="说明数据内容、来源或使用范围">
+</textarea>
+</label>
+<label class="wide">数据署名<input name="attribution" placeholder="© 数据提供方">
+<small>将在需要展示版权信息时使用。</small>
+</label>
+</div>
+</section>
+<section class="catalog-tab-panel hidden" data-catalog-panel="source">
+<div class="catalog-source-workbench">
+<fieldset>
+<div class="catalog-section-head">
+<div>
+<h3>数据源配置</h3>
+<p>指定服务器读取数据的方式与实际位置。</p>
+</div>
+</div>
+<div class="grid">
+<label>数据类型<select name="source_kind">
+<option value="raster">栅格</option>
+<option value="vector">矢量</option>
+</select>
+</label>
+<div class="wide source-config-field">
+<div class="source-config-toolbar"><span>数据源属性</span><button id="add-source-property" type="button">＋ 添加属性</button></div>
+<div class="source-config-table" role="table" aria-label="数据源属性">
+<div class="source-config-row source-config-header" role="row"><span>KEY</span><span>Value</span><span>操作</span></div>
+<div id="source-config-rows"></div>
+</div>
+<small>以属性方式配置数据源，不需要直接编辑 JSON。</small>
+</div>
+</div>
+</fieldset>
+<fieldset>
+<div class="catalog-section-head">
+<div>
+<h3>原生空间信息</h3>
+<p>坐标系及数据自身覆盖的边界框。</p>
+</div>
+<button id="inspect-source" type="button">从数据源读取信息</button>
+</div>
+<div class="grid">
+<label class="wide">原生坐标系<input name="native_crs" required value="EPSG:4326">
+<small>例如 EPSG:4326 或 EPSG:3857。</small>
+</label>
+</div>
+<div class="extent">
+<label>最小 X<input name="min_x" required type="number" step="any">
+</label>
+<label>最小 Y<input name="min_y" required type="number" step="any">
+</label>
+<label>最大 X<input name="max_x" required type="number" step="any">
+</label>
+<label>最大 Y<input name="max_y" required type="number" step="any">
+</label>
+</div>
+<p class="catalog-extent-hint">可使用“从数据源读取信息”自动填充坐标系与范围。</p>
+</fieldset>
+</div>
+</section>
+<div id="form-error" class="form-error hidden">
+</div>
+</div>
+<div class="dialog-actions">
+<span id="catalog-dialog-hint">填写目录项的基础信息</span>
+<button value="cancel">取消</button>
+<button class="primary" id="save" type="button">保存目录项</button>
+</div>
+</form>
+</dialog>
+<dialog id="host-path-picker" class="host-path-picker">
+<form method="dialog">
+<div class="dialog-head">
+<div><label>主机数据目录</label><h2>选择主机路径</h2></div>
+<button value="cancel" class="close" aria-label="关闭">×</button>
+</div>
+<div class="host-path-body">
+<div class="host-path-toolbar"><input id="host-path-input" type="text" value="/" autocomplete="off" spellcheck="false"><button id="host-path-go" type="button">跳转</button><button id="host-path-parent" type="button">上级</button></div>
+<div id="host-path-error" class="form-error hidden"></div>
+<div class="host-path-list-head"><span></span><span>名称</span><span>大小</span><span>创建日期</span></div>
+<div id="host-path-list" class="host-path-list"></div>
+</div>
+<div class="dialog-actions"><span id="host-path-selection">单击选中，双击目录进入。</span><button value="cancel">取消</button><button id="choose-host-directory" type="button">选择此目录</button><button id="choose-host-path" class="primary" type="button" disabled>选择文件</button></div>
+</form>
+</dialog>
+<dialog id="publish-editor" class="published-editor quick-publish-editor">
+<form id="publish-form" method="dialog">
+<div class="dialog-head"><div><label>服务发布配置</label><h2>添加发布图层</h2></div><button value="cancel" class="close" aria-label="关闭">×</button></div>
+<div class="dialog-body">
+<section class="published-tab-panel">
+<div class="published-section-head"><div><h3>图层服务标识</h3><p>已根据数据项填写必要参数，保存前仍可调整。</p></div><span>WMS · WMTS</span></div>
+<div class="grid published-form-grid">
+<label>应用 ID<input name="app_id" required></label>
+<label>服务名称<input name="name" required></label>
+<label class="wide">显示标题<input name="title" required></label>
+<label class="wide">描述<textarea name="description" rows="3"></textarea></label>
+<label class="wide">目录项<input name="catalog_item_id" type="hidden" required><span class="selector-field"><input id="publish-catalog-display" readonly></span><small>当前数据项将作为图层的数据来源。</small></label>
+<label class="wide">输出坐标系<input name="supported_crs" required><small>多个坐标系使用逗号分隔。</small></label>
+<label>最小比例尺分母<input name="min_scale_denominator" type="number" min="0.000001" step="any" placeholder="不限制"></label>
+<label>最大比例尺分母<input name="max_scale_denominator" type="number" min="0.000001" step="any" placeholder="不限制"></label>
+<label class="wide">动态概化系数<input name="simplify_factor" type="number" min="0" step="0.1" placeholder="不概化"></label>
+</div>
+<div class="published-switches"><label><input name="enabled" type="checkbox" checked><span><b>启用发布</b><small>在 WMS 与 WMTS 服务中提供该图层</small></span></label><label><input name="queryable" type="checkbox"><span><b>允许要素查询</b><small>允许通过 GetFeatureInfo 查询属性</small></span></label></div>
+</section>
+<div id="publish-form-error" class="form-error hidden"></div>
+</div>
+<div class="dialog-actions"><span>保存后可在“发布图层”中继续配置默认样式</span><button value="cancel">取消</button><button class="primary" id="publish-save" type="button">保存发布图层</button></div>
+</form>
+</dialog>
+<dialog id="confirm">
+<form method="dialog">
+<i class="state-icon bad">!</i>
+<h2>删除目录项？</h2>
+<p>此操作将永久删除数据资产 <b id="delete-name">
+</b>。引用它的发布图层将一并删除，并从图层组中移除。</p>
+<div>
+<button value="cancel">取消</button>
+<button class="danger" id="delete" type="button">确认删除</button>
+</div>
+</form>
+</dialog>
+<div id="toast">
+</div>
+<script src="/assets/app.js" defer>
+</script>
+</body>
+</html>

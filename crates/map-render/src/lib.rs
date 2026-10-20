@@ -26,6 +26,7 @@ pub struct VectorPaint {
     pub fill_image: Option<VectorImageFill>,
     pub stroke: Option<VectorColor>,
     pub stroke_width: f32,
+    pub stroke_dasharray: Vec<f32>,
     pub text: Option<VectorTextStyle>,
 }
 
@@ -34,12 +35,15 @@ pub struct VectorTextStyle {
     pub field: String,
     pub font_family: String,
     pub font_size: f32,
+    pub font_italic: bool,
+    pub font_bold: bool,
     pub fill: Rgba,
     pub halo: Rgba,
     pub halo_radius: f32,
     pub spacing: f32,
     pub min_area: f32,
     pub repeat_distance: f32,
+    pub repeat_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
