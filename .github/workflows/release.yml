@@ -36,7 +36,7 @@ jobs:
       - name: Login to Cangling registry
         uses: docker/login-action@v4
         with:
-          registry: soft.cangling.cn:22002
+          registry: harbor.cangling.cn:22002
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
