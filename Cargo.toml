@@ -9,6 +9,7 @@ members = [
     "crates/map-gdal",
     "crates/map-style",
     "crates/map-server",
+    "crates/gpu-render-bench",
 ]
 resolver = "2"
 
@@ -28,6 +29,9 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 image = "0.25"
 tiny-skia = "0.11"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+wgpu = "23"
 quick-xml = { version = "0.38", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

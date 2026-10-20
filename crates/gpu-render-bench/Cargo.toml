@@ -1,0 +1,16 @@
+[package]
+name = "gpu-render-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+tiny-skia.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true
