@@ -53,3 +53,18 @@ GPU_BENCH_ADAPTER=NVIDIA cargo run --release -p gpu-render-bench
 主机能够枚举 RTX 4060 PCI 设备，但当前 NVIDIA NVML 报告驱动/库版本不匹配，Vulkan 侧也
 没有向 `wgpu` 暴露 NVIDIA adapter，因此本轮独显测试未执行。修复宿主机驱动后可使用
 `GPU_BENCH_ADAPTER=NVIDIA` 重跑。
+
+## 2026-10-21 RTX 4060 复测
+
+重启主机后，NVIDIA 内核模块与用户态库统一为 `595.99.02`，`wgpu` 通过 Vulkan 正常选择
+NVIDIA GeForce RTX 4060 Laptop GPU。release 模式、每组 10 次的结果如下：
+
+| 尺寸 | 图元数 | tiny-skia CPU | RTX 4060 总耗时 | 加速比 |
+| --- | ---: | ---: | ---: | ---: |
+| 256×256 | 250 | 0.858 ms | 1.104 ms | 0.78× |
+| 1024×1024 | 2,000 | 52.028 ms | 2.479 ms | 20.98× |
+| 2048×2048 | 8,000 | 744.972 ms | 16.320 ms | 45.65× |
+
+RTX 4060 大幅降低了固定提交与回读成本，但 256×256 单瓦片仍略慢于 CPU。结论保持不变：
+普通小瓦片应继续走 CPU 或合并成批次提交；大幅 WMS、批量瓦片和缓存预热是 GPU 后端的
+优先应用场景。
