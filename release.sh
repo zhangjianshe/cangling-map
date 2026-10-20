@@ -50,5 +50,5 @@ git push "$remote" "v${new}"
 
 echo "released v${current} -> v${new} and pushed ${branch} to ${remote}"
 echo "CI will publish linux/amd64 and linux/arm64 images:"
-echo "  soft.cangling.cn:22002/cangling/cangling-map:${new}"
-echo "  soft.cangling.cn:22002/cangling/cangling-map:latest"
+echo "  harbor.cangling.cn:22002/cangling/cangling-map:${new}"
+echo "  harbor.cangling.cn:22002/cangling/cangling-map:latest"
