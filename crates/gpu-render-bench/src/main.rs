@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
+use cangling_gdal_core::{rasterize_text_label, RasterizedLabel, VectorTextStyle};
 use gdal::{
     vector::{Geometry, LayerAccess},
     Dataset,
@@ -775,6 +776,109 @@ fn measure(mut render: impl FnMut() -> Result<Vec<u8>>, iterations: u32) -> Resu
     Ok(started.elapsed() / iterations)
 }
 
+fn sample_label_atlas(width: u32, height: u32) -> Result<map_gpu::AtlasOverlay> {
+    let style = VectorTextStyle {
+        field: "name".into(),
+        font_family: "IPAex Gothic".into(),
+        font_size: 22.0,
+        font_italic: false,
+        font_bold: true,
+        fill: [32, 53, 42, 255],
+        halo: [255, 255, 255, 230],
+        halo_radius: 2.0,
+        spacing: 0.0,
+        min_area: 0.0,
+        repeat_distance: 0.0,
+        repeat_count: 1,
+    };
+    let labels = [
+        "河南省",
+        "郑州市",
+        "洛阳市",
+        "开封市",
+        "南阳市",
+        "信阳市",
+        "周口市",
+        "许昌市",
+        "三门峡市",
+        "平顶山市",
+        "驻马店市",
+        "焦作市",
+    ]
+    .iter()
+    .map(|text| rasterize_text_label(text, &style))
+    .collect::<Result<Vec<_>, _>>()?;
+    pack_label_atlas(width, height, &labels)
+}
+
+fn pack_label_atlas(
+    output_width: u32,
+    output_height: u32,
+    labels: &[RasterizedLabel],
+) -> Result<map_gpu::AtlasOverlay> {
+    const ATLAS_WIDTH: u32 = 512;
+    const GAP: u32 = 2;
+    let mut positions = Vec::with_capacity(labels.len());
+    let (mut x, mut y, mut row_height) = (GAP, GAP, 0);
+    for label in labels {
+        if x + label.width + GAP > ATLAS_WIDTH {
+            x = GAP;
+            y += row_height + GAP;
+            row_height = 0;
+        }
+        positions.push((x, y));
+        x += label.width + GAP;
+        row_height = row_height.max(label.height);
+    }
+    let atlas_height = (y + row_height + GAP).max(1);
+    let mut rgba = vec![0; (ATLAS_WIDTH * atlas_height * 4) as usize];
+    let mut vertices = Vec::with_capacity(labels.len() * 4);
+    let mut indices = Vec::with_capacity(labels.len() * 6);
+    for (index, (label, &(atlas_x, atlas_y))) in labels.iter().zip(&positions).enumerate() {
+        for row in 0..label.height {
+            let source = (row * label.width * 4) as usize;
+            let destination = (((atlas_y + row) * ATLAS_WIDTH + atlas_x) * 4) as usize;
+            rgba[destination..destination + (label.width * 4) as usize]
+                .copy_from_slice(&label.rgba[source..source + (label.width * 4) as usize]);
+        }
+        let columns = 4;
+        let output_x = 70 + (index as u32 % columns) * (output_width.saturating_sub(140) / columns);
+        let output_y = 80 + (index as u32 / columns) * 110;
+        let left = output_x as f32;
+        let top = output_y as f32;
+        let right = left + label.width as f32;
+        let bottom = top + label.height as f32;
+        let positions = [(left, top), (right, top), (right, bottom), (left, bottom)];
+        let u0 = atlas_x as f32 / ATLAS_WIDTH as f32;
+        let v0 = atlas_y as f32 / atlas_height as f32;
+        let u1 = (atlas_x + label.width) as f32 / ATLAS_WIDTH as f32;
+        let v1 = (atlas_y + label.height) as f32 / atlas_height as f32;
+        let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+        let base = vertices.len() as u32;
+        for ((x, y), uv) in positions.into_iter().zip(uvs) {
+            vertices.push(map_gpu::AtlasVertex {
+                position: [
+                    x / output_width as f32 * 2.0 - 1.0,
+                    1.0 - y / output_height as f32 * 2.0,
+                    0.0,
+                    1.0,
+                ],
+                uv,
+                _padding: [0.0; 2],
+                color: [1.0; 4],
+            });
+        }
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Ok(map_gpu::AtlasOverlay {
+        width: ATLAS_WIDTH,
+        height: atlas_height,
+        rgba,
+        vertices,
+        indices,
+    })
+}
+
 fn main() -> Result<()> {
     let gpu = pollster::block_on(GpuRenderer::new())?;
     let iterations = std::env::var("GPU_BENCH_ITERATIONS")
@@ -817,6 +921,27 @@ fn main() -> Result<()> {
     let production_gpu = ProductionGpuRenderer::new(&map_gpu::RendererOptions {
         adapter_name: std::env::var("GPU_BENCH_ADAPTER").ok(),
     })?;
+    let label_atlas = sample_label_atlas(1024, 512)?;
+    let label_scene = production_gpu.prepare_with_atlas(1024, 512, &[], Some(&label_atlas))?;
+    let label_time = measure(|| Ok(production_gpu.render_rgba(&label_scene)?), iterations)?;
+    let label_pixels = production_gpu.render_rgba(&label_scene)?;
+    println!(
+        "label_atlas=12 labels atlas={}x{} resident_ms={:.3} vram_mb={:.2}",
+        label_atlas.width,
+        label_atlas.height,
+        label_time.as_secs_f64() * 1000.0,
+        label_scene.stats().estimated_gpu_bytes as f64 / (1024.0 * 1024.0),
+    );
+    if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
+        std::fs::create_dir_all(&output)?;
+        image::save_buffer(
+            Path::new(&output).join("label-atlas-gpu.png"),
+            &label_pixels,
+            1024,
+            512,
+            image::ColorType::Rgba8,
+        )?;
+    }
     let real_iterations = iterations.min(5);
     let real_cases = [
         (

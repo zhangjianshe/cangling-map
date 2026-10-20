@@ -196,6 +196,23 @@ pub struct VectorTextStyle {
     pub repeat_count: u32,
 }
 
+/// Cacheable RGBA label patch produced with the same shaping, bold and halo
+/// semantics as vector rendering. The GPU backend packs these patches into an
+/// atlas after label placement and collision resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterizedLabel {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+pub fn rasterize_text_label(
+    text: &str,
+    style: &VectorTextStyle,
+) -> Result<RasterizedLabel, GdalError> {
+    tiny_skia_renderer::rasterize_text_label(text, style)
+}
+
 fn default_label_repeat_count() -> u32 {
     1
 }

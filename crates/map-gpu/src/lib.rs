@@ -20,6 +20,27 @@ pub struct Vertex {
     pub color: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct AtlasVertex {
+    /// Clip-space position. Z should be zero and W should be one.
+    pub position: [f32; 4],
+    pub uv: [f32; 2],
+    /// WGSL alignment padding before the following vec4.
+    pub _padding: [f32; 2],
+    /// Multiplied with the sampled RGBA value.
+    pub color: [f32; 4],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AtlasOverlay {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub vertices: Vec<AtlasVertex>,
+    pub indices: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct MeshChunk {
     pub vertices: Vec<Vertex>,
@@ -86,13 +107,21 @@ pub enum GpuError {
     },
     #[error("GPU readback failed: {0}")]
     Readback(String),
+    #[error("atlas dimensions must be non-zero")]
+    InvalidAtlasDimensions,
+    #[error("atlas contains {actual} RGBA bytes; expected {expected}")]
+    InvalidAtlasPixels { actual: usize, expected: usize },
+    #[error("atlas contains index {index} outside {vertices} vertices")]
+    InvalidAtlasIndex { index: u32, vertices: usize },
 }
 
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    atlas_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    atlas_bind_group_layout: wgpu::BindGroupLayout,
     adapter: AdapterInfo,
 }
 
@@ -108,12 +137,22 @@ pub struct PreparedScene {
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
     stats: PreparedSceneStats,
+    atlas: Option<PreparedAtlas>,
 }
 
 struct DrawBatch {
     bind_group: wgpu::BindGroup,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+}
+
+struct PreparedAtlas {
+    bind_group: wgpu::BindGroup,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    estimated_gpu_bytes: usize,
+    _texture: wgpu::Texture,
+    _sampler: wgpu::Sampler,
 }
 
 impl Renderer {
@@ -162,6 +201,10 @@ impl Renderer {
             label: Some("cangling-map flat mesh shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
+        let atlas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cangling-map atlas shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("atlas.wgsl").into()),
+        });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cangling-map mesh layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -180,6 +223,44 @@ impl Renderer {
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
+        let atlas_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cangling-map atlas layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let atlas_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("cangling-map atlas pipeline layout"),
+                bind_group_layouts: &[&atlas_bind_group_layout],
+                push_constant_ranges: &[],
+            });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cangling-map mesh pipeline"),
             layout: Some(&pipeline_layout),
@@ -208,11 +289,42 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let atlas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cangling-map atlas pipeline"),
+            layout: Some(&atlas_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &atlas_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &atlas_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    // tiny-skia atlas pixels are premultiplied RGBA.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: SAMPLE_COUNT,
+                ..Default::default()
+            },
+            multiview: None,
+            cache: None,
+        });
         Ok(Self {
             device,
             queue,
             pipeline,
+            atlas_pipeline,
             bind_group_layout,
+            atlas_bind_group_layout,
             adapter: AdapterInfo {
                 name: info.name,
                 backend: format!("{:?}", info.backend),
@@ -230,6 +342,16 @@ impl Renderer {
         width: u32,
         height: u32,
         chunks: &[MeshChunk],
+    ) -> Result<PreparedScene, GpuError> {
+        self.prepare_with_atlas(width, height, chunks, None)
+    }
+
+    pub fn prepare_with_atlas(
+        &self,
+        width: u32,
+        height: u32,
+        chunks: &[MeshChunk],
+        atlas: Option<&AtlasOverlay>,
     ) -> Result<PreparedScene, GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::InvalidDimensions);
@@ -314,6 +436,10 @@ impl Renderer {
         });
         stats.estimated_gpu_bytes +=
             (u64::from(width) * u64::from(height) * 4 * (2 + u64::from(SAMPLE_COUNT))) as usize;
+        let atlas = atlas.map(|atlas| self.prepare_atlas(atlas)).transpose()?;
+        if let Some(atlas) = atlas.as_ref() {
+            stats.estimated_gpu_bytes += atlas.estimated_gpu_bytes;
+        }
         Ok(PreparedScene {
             batches,
             texture,
@@ -326,6 +452,84 @@ impl Renderer {
             unpadded_bytes_per_row,
             padded_bytes_per_row,
             stats,
+            atlas,
+        })
+    }
+
+    fn prepare_atlas(&self, atlas: &AtlasOverlay) -> Result<PreparedAtlas, GpuError> {
+        validate_atlas(atlas)?;
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cangling-map atlas vertices"),
+                contents: bytemuck::cast_slice(&atlas.vertices),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cangling-map atlas indices"),
+                contents: bytemuck::cast_slice(&atlas.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cangling-map RGBA atlas"),
+            size: wgpu::Extent3d {
+                width: atlas.width,
+                height: atlas.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            &atlas.rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas.width * 4),
+                rows_per_image: Some(atlas.height),
+            },
+            texture.size(),
+        );
+        let view = texture.create_view(&Default::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cangling-map atlas sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cangling-map atlas bind group"),
+            layout: &self.atlas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        Ok(PreparedAtlas {
+            bind_group,
+            index_buffer,
+            index_count: atlas.indices.len() as u32,
+            estimated_gpu_bytes: atlas.rgba.len()
+                + atlas.vertices.len() * std::mem::size_of::<AtlasVertex>()
+                + atlas.indices.len() * std::mem::size_of::<u32>(),
+            _texture: texture,
+            _sampler: sampler,
         })
     }
 
@@ -351,6 +555,12 @@ impl Renderer {
                 pass.set_bind_group(0, &batch.bind_group, &[]);
                 pass.set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..batch.index_count, 0, 0..1);
+            }
+            if let Some(atlas) = scene.atlas.as_ref() {
+                pass.set_pipeline(&self.atlas_pipeline);
+                pass.set_bind_group(0, &atlas.bind_group, &[]);
+                pass.set_index_buffer(atlas.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..atlas.index_count, 0, 0..1);
             }
         }
         encoder.copy_texture_to_buffer(
@@ -385,6 +595,31 @@ impl Renderer {
         scene.output.unmap();
         Ok(pixels)
     }
+}
+
+fn validate_atlas(atlas: &AtlasOverlay) -> Result<(), GpuError> {
+    if atlas.width == 0 || atlas.height == 0 {
+        return Err(GpuError::InvalidAtlasDimensions);
+    }
+    let expected = atlas.width as usize * atlas.height as usize * 4;
+    if atlas.rgba.len() != expected {
+        return Err(GpuError::InvalidAtlasPixels {
+            actual: atlas.rgba.len(),
+            expected,
+        });
+    }
+    if let Some(index) = atlas
+        .indices
+        .iter()
+        .copied()
+        .find(|index| *index as usize >= atlas.vertices.len())
+    {
+        return Err(GpuError::InvalidAtlasIndex {
+            index,
+            vertices: atlas.vertices.len(),
+        });
+    }
+    Ok(())
 }
 
 impl PreparedScene {
@@ -439,7 +674,7 @@ fn validate_chunk(
 mod tests {
     use bytemuck::Zeroable;
 
-    use super::{validate_chunk, MeshChunk, Vertex};
+    use super::{validate_atlas, validate_chunk, AtlasOverlay, MeshChunk, Vertex};
 
     #[test]
     fn rejects_an_out_of_range_index_before_gpu_upload() {
@@ -460,5 +695,16 @@ mod tests {
             indices: vec![0, 1, 2, 0, 2, 3],
         };
         assert_eq!(chunk.estimated_gpu_bytes(), 4 * 32 + 6 * 4);
+    }
+
+    #[test]
+    fn rejects_an_atlas_with_the_wrong_rgba_length() {
+        let atlas = AtlasOverlay {
+            width: 2,
+            height: 2,
+            rgba: vec![0; 15],
+            ..Default::default()
+        };
+        assert!(validate_atlas(&atlas).is_err());
     }
 }

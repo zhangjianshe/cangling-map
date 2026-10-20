@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytemuck.workspace = true
+cangling-gdal-core = { path = "../cangling-gdal-core" }
 earcutr = "0.4"
 gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
 image.workspace = true

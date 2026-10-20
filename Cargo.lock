@@ -1074,6 +1074,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "cangling-gdal-core",
  "earcutr",
  "gdal",
  "image",

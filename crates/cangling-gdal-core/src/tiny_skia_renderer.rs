@@ -20,8 +20,8 @@ use tiny_skia::{
 };
 
 use crate::{
-    GdalError, ImageFormat, RenderedImage, VectorComparisonOperator, VectorFilter, VectorLiteral,
-    VectorRenderRequest, VectorTextStyle,
+    GdalError, ImageFormat, RasterizedLabel, RenderedImage, VectorComparisonOperator, VectorFilter,
+    VectorLiteral, VectorRenderRequest, VectorTextStyle,
 };
 
 pub(crate) fn render_projected(
@@ -455,6 +455,62 @@ fn render_labels(
         stats.labels += 1;
     }
     Ok(())
+}
+
+pub(crate) fn rasterize_text_label(
+    text: &str,
+    style: &VectorTextStyle,
+) -> Result<RasterizedLabel, GdalError> {
+    let Some(candidate) = shape_label(text, (0.0, 0.0), (0.0, 0.0), style)? else {
+        return Err(GdalError::InvalidRequest(
+            "label has no drawable glyphs".into(),
+        ));
+    };
+    let width = (candidate.bounds.right - candidate.bounds.left)
+        .ceil()
+        .max(1.0) as u32;
+    let height = (candidate.bounds.bottom - candidate.bounds.top)
+        .ceil()
+        .max(1.0) as u32;
+    let mut pixmap = Pixmap::new(width, height)
+        .ok_or_else(|| GdalError::InvalidRequest("invalid label dimensions".into()))?;
+    let transform = Transform::from_translate(-candidate.bounds.left, -candidate.bounds.top);
+    if candidate.halo_radius > 0.0 {
+        let mut halo = paint(candidate.halo);
+        halo.anti_alias = true;
+        pixmap.stroke_path(
+            &candidate.path,
+            &halo,
+            &Stroke {
+                width: candidate.halo_radius * 2.0,
+                ..Stroke::default()
+            },
+            transform,
+            None,
+        );
+    }
+    if candidate.bold {
+        let mut bold = paint(candidate.fill);
+        bold.anti_alias = true;
+        pixmap.stroke_path(
+            &candidate.path,
+            &bold,
+            &Stroke {
+                width: 0.9,
+                ..Stroke::default()
+            },
+            transform,
+            None,
+        );
+    }
+    let mut fill = paint(candidate.fill);
+    fill.anti_alias = true;
+    pixmap.fill_path(&candidate.path, &fill, FillRule::Winding, transform, None);
+    Ok(RasterizedLabel {
+        width,
+        height,
+        rgba: pixmap.data().to_vec(),
+    })
 }
 
 fn geometry_label_point(geometry: &Geometry) -> Option<(f64, f64)> {
