@@ -330,7 +330,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cangling-gdal-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gdal",
  "gdal-sys",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "map-catalog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "map-core",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "map-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "map-gdal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "cangling-gdal-core",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "map-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "image",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "map-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "map-style"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "map-core",
  "quick-xml",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "ogc-wms"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "map-core",
  "serde",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "ogc-wmts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
 ]
