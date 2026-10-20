@@ -1,7 +1,14 @@
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
+use gdal::{
+    vector::{Geometry, LayerAccess},
+    Dataset,
+};
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Transform};
 use wgpu::util::DeviceExt;
 
@@ -33,8 +40,7 @@ struct GpuRenderer {
 }
 
 struct PreparedGpuScene {
-    bind_group: wgpu::BindGroup,
-    vertex_count: u32,
+    batches: Vec<GpuDrawBatch>,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     output: wgpu::Buffer,
@@ -42,6 +48,11 @@ struct PreparedGpuScene {
     height: u32,
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
+}
+
+struct GpuDrawBatch {
+    bind_group: wgpu::BindGroup,
+    vertex_count: u32,
 }
 
 impl GpuRenderer {
@@ -144,21 +155,38 @@ impl GpuRenderer {
             .iter()
             .flat_map(|rectangle| rectangle_vertices(width, height, *rectangle))
             .collect::<Vec<_>>();
-        let vertex_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("polygon vertices"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("polygon vertices"),
-            layout: &self.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: vertex_buffer.as_entire_binding(),
-            }],
-        });
+        self.prepare_vertices(width, height, &vertices)
+    }
+
+    fn prepare_vertices(&self, width: u32, height: u32, vertices: &[Vertex]) -> PreparedGpuScene {
+        let max_vertices = (self.device.limits().max_storage_buffer_binding_size as usize
+            / std::mem::size_of::<Vertex>())
+            / 3
+            * 3;
+        let batches = vertices
+            .chunks(max_vertices)
+            .map(|vertices| {
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("polygon vertex chunk"),
+                            contents: bytemuck::cast_slice(vertices),
+                            usage: wgpu::BufferUsages::STORAGE,
+                        });
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("polygon vertex chunk"),
+                    layout: &self.bind_group_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: vertex_buffer.as_entire_binding(),
+                    }],
+                });
+                GpuDrawBatch {
+                    bind_group,
+                    vertex_count: vertices.len() as u32,
+                }
+            })
+            .collect();
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen target"),
             size: wgpu::Extent3d {
@@ -183,8 +211,7 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
         PreparedGpuScene {
-            bind_group,
-            vertex_count: vertices.len() as u32,
+            batches,
             texture,
             view,
             output,
@@ -218,8 +245,10 @@ impl GpuRenderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &scene.bind_group, &[]);
-            pass.draw(0..scene.vertex_count, 0..1);
+            for batch in &scene.batches {
+                pass.set_bind_group(0, &batch.bind_group, &[]);
+                pass.draw(0..batch.vertex_count, 0..1);
+            }
         }
         encoder.copy_texture_to_buffer(
             scene.texture.as_image_copy(),
@@ -301,6 +330,169 @@ fn cpu_render(width: u32, height: u32, rectangles: &[Rectangle]) -> Result<Vec<u
     Ok(pixmap.data().to_vec())
 }
 
+#[derive(Default)]
+struct RealGeometryScene {
+    polygons: Vec<Vec<Vec<(f32, f32)>>>,
+    vertices: Vec<Vertex>,
+    features: usize,
+    rings: usize,
+}
+
+#[derive(Clone, Copy)]
+struct WorldBounds {
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+}
+
+impl WorldBounds {
+    fn pixel(self, width: u32, height: u32, x: f64, y: f64) -> (f32, f32) {
+        (
+            ((x - self.min_x) / (self.max_x - self.min_x) * f64::from(width)) as f32,
+            ((self.max_y - y) / (self.max_y - self.min_y) * f64::from(height)) as f32,
+        )
+    }
+}
+
+fn load_real_scene(
+    path: &str,
+    width: u32,
+    height: u32,
+    bounds: WorldBounds,
+) -> Result<RealGeometryScene> {
+    let dataset = Dataset::open(path).with_context(|| format!("failed to open {path}"))?;
+    let mut layer = dataset.layer(0)?;
+    layer.set_spatial_filter_rect(bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y);
+    let mut scene = RealGeometryScene::default();
+    for (feature_index, feature) in layer.features().enumerate() {
+        let Some(geometry) = feature.geometry() else {
+            continue;
+        };
+        scene.features += 1;
+        let color = [
+            0.18 + (feature_index % 5) as f32 * 0.025,
+            0.45 + (feature_index % 7) as f32 * 0.018,
+            0.32 + (feature_index % 3) as f32 * 0.025,
+            0.78,
+        ];
+        append_real_geometry(geometry, width, height, bounds, color, &mut scene)?;
+    }
+    Ok(scene)
+}
+
+fn append_real_geometry(
+    geometry: &Geometry,
+    width: u32,
+    height: u32,
+    bounds: WorldBounds,
+    color: [f32; 4],
+    scene: &mut RealGeometryScene,
+) -> Result<()> {
+    match geometry.geometry_name().to_ascii_uppercase().as_str() {
+        "POLYGON" => append_real_polygon(geometry, width, height, bounds, color, scene),
+        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => {
+            for index in 0..geometry.geometry_count() {
+                append_real_geometry(
+                    &geometry.get_geometry(index),
+                    width,
+                    height,
+                    bounds,
+                    color,
+                    scene,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn append_real_polygon(
+    polygon: &Geometry,
+    width: u32,
+    height: u32,
+    bounds: WorldBounds,
+    color: [f32; 4],
+    scene: &mut RealGeometryScene,
+) -> Result<()> {
+    let mut rings = Vec::new();
+    let mut flat_coordinates = Vec::new();
+    let mut holes = Vec::new();
+    for ring_index in 0..polygon.geometry_count() {
+        let ring = polygon.get_geometry(ring_index);
+        let mut points = (0..ring.point_count())
+            .map(|point_index| {
+                let (x, y, _) = ring.get_point(point_index as i32);
+                bounds.pixel(width, height, x, y)
+            })
+            .collect::<Vec<_>>();
+        points.dedup();
+        if points.len() > 1 && points.first() == points.last() {
+            points.pop();
+        }
+        if points.len() < 3 {
+            continue;
+        }
+        if !rings.is_empty() {
+            holes.push(flat_coordinates.len() / 2);
+        }
+        for &(x, y) in &points {
+            flat_coordinates.extend([f64::from(x), f64::from(y)]);
+        }
+        rings.push(points);
+    }
+    if rings.is_empty() {
+        return Ok(());
+    }
+    let indices = earcutr::earcut(&flat_coordinates, &holes, 2)
+        .map_err(|error| anyhow::anyhow!("polygon triangulation failed: {error}"))?;
+    let points = flat_coordinates
+        .chunks_exact(2)
+        .map(|point| [point[0] as f32, point[1] as f32])
+        .collect::<Vec<_>>();
+    for index in indices {
+        let point = points[index];
+        let x = point[0] / width as f32 * 2.0 - 1.0;
+        let y = 1.0 - point[1] / height as f32 * 2.0;
+        scene.vertices.push(Vertex {
+            position: [x, y, 0.0, 1.0],
+            color,
+        });
+    }
+    scene.rings += rings.len();
+    scene.polygons.push(rings);
+    Ok(())
+}
+
+fn cpu_render_real(width: u32, height: u32, scene: &RealGeometryScene) -> Result<Vec<u8>> {
+    let mut pixmap = Pixmap::new(width, height).context("invalid image dimensions")?;
+    pixmap.fill(Color::TRANSPARENT);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(48, 118, 84, 199);
+    paint.anti_alias = true;
+    for polygon in &scene.polygons {
+        let mut builder = PathBuilder::new();
+        for ring in polygon {
+            builder.move_to(ring[0].0, ring[0].1);
+            for &(x, y) in &ring[1..] {
+                builder.line_to(x, y);
+            }
+            builder.close();
+        }
+        if let Some(path) = builder.finish() {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::EvenOdd,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+    Ok(pixmap.data().to_vec())
+}
+
 fn scene(width: u32, height: u32, count: usize) -> Vec<Rectangle> {
     (0..count)
         .map(|index| {
@@ -371,5 +563,103 @@ fn main() -> Result<()> {
         metatile.as_secs_f64() * 1000.0,
         metatile.as_secs_f64() * 1000.0 / 16.0,
     );
+
+    println!("real_dataset,size,features,rings,triangles,gpu_chunks,prepare_ms,upload_ms,cpu_ms,gpu_resident_ms,speedup,vram_mb");
+    let real_iterations = iterations.min(5);
+    let real_cases = [
+        (
+            "province-china",
+            "/opt/cis/core/geoserver/data/china/sheng201912.shp",
+            2048,
+            1536,
+            WorldBounds {
+                min_x: 73.0,
+                min_y: 3.0,
+                max_x: 136.0,
+                max_y: 54.0,
+            },
+        ),
+        (
+            "county-henan",
+            "/opt/cis/core/geoserver/data/china/xian201912.shp",
+            1024,
+            1024,
+            WorldBounds {
+                min_x: 109.5,
+                min_y: 30.5,
+                max_x: 117.8,
+                max_y: 37.0,
+            },
+        ),
+        (
+            "township-henan",
+            "/opt/cis/core/geoserver/data/china/shape_china_xz.shp",
+            1024,
+            1024,
+            WorldBounds {
+                min_x: 109.5,
+                min_y: 30.5,
+                max_x: 117.8,
+                max_y: 37.0,
+            },
+        ),
+        (
+            "county-henan-tile",
+            "/opt/cis/core/geoserver/data/china/xian201912.shp",
+            256,
+            256,
+            WorldBounds {
+                min_x: 112.8,
+                min_y: 33.2,
+                max_x: 114.2,
+                max_y: 34.6,
+            },
+        ),
+        (
+            "township-henan-tile",
+            "/opt/cis/core/geoserver/data/china/shape_china_xz.shp",
+            256,
+            256,
+            WorldBounds {
+                min_x: 112.8,
+                min_y: 33.2,
+                max_x: 114.2,
+                max_y: 34.6,
+            },
+        ),
+    ];
+    for (name, path, width, height, bounds) in real_cases {
+        if !Path::new(path).is_file() {
+            eprintln!("skipping missing real dataset: {path}");
+            continue;
+        }
+        let prepare_started = Instant::now();
+        let real_scene = load_real_scene(path, width, height, bounds)?;
+        let prepare_elapsed = prepare_started.elapsed();
+        let upload_started = Instant::now();
+        let gpu_scene = gpu.prepare_vertices(width, height, &real_scene.vertices);
+        let upload_elapsed = upload_started.elapsed();
+        let cpu = measure(
+            || cpu_render_real(width, height, &real_scene),
+            real_iterations,
+        )?;
+        let gpu_time = measure(|| gpu.render_prepared(&gpu_scene), real_iterations)?;
+        let triangles = real_scene.vertices.len() / 3;
+        let vram_mb = real_scene.vertices.len() * std::mem::size_of::<Vertex>()
+            + (width * height * 8) as usize;
+        println!(
+            "{name},{}x{height},{},{},{triangles},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2}",
+            width,
+            real_scene.features,
+            real_scene.rings,
+            gpu_scene.batches.len(),
+            prepare_elapsed.as_secs_f64() * 1000.0,
+            upload_elapsed.as_secs_f64() * 1000.0,
+            cpu.as_secs_f64() * 1000.0,
+            gpu_time.as_secs_f64() * 1000.0,
+            cpu.as_secs_f64() / gpu_time.as_secs_f64(),
+            vram_mb as f64 / (1024.0 * 1024.0),
+        );
+    }
     Ok(())
 }
