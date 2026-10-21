@@ -16,6 +16,7 @@ thiserror.workspace = true
 tracing.workspace = true
 rustybuzz.workspace = true
 ttf-parser.workspace = true
+earcutr = "0.4"
 sha2.workspace = true
 
 [lints]

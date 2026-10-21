@@ -33,9 +33,10 @@ use map_catalog::{
     PublishedLayer, SourceKind, SqliteCatalog, StyleRecord, StyleStore,
 };
 use map_render::{
-    blank_image, blank_png, ImageFormat as RenderImageFormat, VectorColor, VectorImageFill,
-    VectorPaint, VectorRasterRequest as RenderVectorRequest, VectorRasterizer, VectorRenderRule,
-    VectorSource, VectorTextStyle,
+    blank_image, blank_png, FallbackRasterizerStats, FallbackVectorRasterizer,
+    ImageFormat as RenderImageFormat, VectorColor, VectorImageFill, VectorPaint,
+    VectorRasterRequest as RenderVectorRequest, VectorRasterizer, VectorRenderRule, VectorSource,
+    VectorTextStyle,
 };
 use map_style::{compile_geocss, to_sld_1_1, ColorExpression, Style};
 use ogc_wms::{
@@ -62,6 +63,9 @@ struct AppState {
     local_wmts_cache: WmtsCache,
     cache_service_settings: Arc<StdMutex<CacheServiceSettings>>,
     vector_rasterizer: Arc<dyn VectorRasterizer>,
+    gpu_rasterizer: Option<Arc<FallbackVectorRasterizer>>,
+    gpu_backend: Option<Arc<map_gdal::GpuVectorRasterizer>>,
+    vector_render_backend: String,
     render_limit: Arc<Semaphore>,
     tile_flights: Arc<StdMutex<HashMap<WmtsCacheKey, Weak<Mutex<()>>>>>,
     prepared_vector_sources: Arc<Mutex<HashSet<String>>>,
@@ -557,12 +561,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         local_wmts_cache.clone()
     };
+    let (vector_rasterizer, gpu_rasterizer, gpu_backend, vector_render_backend) =
+        configure_vector_rasterizer()?;
     let state = AppState {
         catalog,
         wmts_cache: Arc::new(StdMutex::new(active_wmts_cache)),
         local_wmts_cache,
         cache_service_settings: Arc::new(StdMutex::new(cache_service_settings)),
-        vector_rasterizer: Arc::new(map_gdal::GdalVectorRasterizer),
+        vector_rasterizer,
+        gpu_rasterizer,
+        gpu_backend,
+        vector_render_backend,
         render_limit: Arc::new(Semaphore::new(render_concurrency)),
         tile_flights: Arc::new(StdMutex::new(HashMap::new())),
         prepared_vector_sources: Arc::new(Mutex::new(HashSet::new())),
@@ -672,6 +681,54 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {address}"))?;
     tracing::info!(%address, "map server listening");
     axum::serve(listener, app).await.context("server failed")
+}
+
+fn configure_vector_rasterizer() -> anyhow::Result<(
+    Arc<dyn VectorRasterizer>,
+    Option<Arc<FallbackVectorRasterizer>>,
+    Option<Arc<map_gdal::GpuVectorRasterizer>>,
+    String,
+)> {
+    let backend = std::env::var("MAP_RENDER_BACKEND")
+        .unwrap_or_else(|_| "cpu".into())
+        .to_ascii_lowercase();
+    let cpu: Arc<dyn VectorRasterizer> = Arc::new(map_gdal::GdalVectorRasterizer);
+    if backend == "cpu" {
+        tracing::info!("vector renderer backend: cpu");
+        return Ok((cpu, None, None, "cpu".into()));
+    }
+    if backend != "auto" && backend != "gpu" {
+        anyhow::bail!("MAP_RENDER_BACKEND must be cpu, auto, or gpu");
+    }
+    let adapter = std::env::var("MAP_GPU_ADAPTER").ok();
+    match map_gdal::GpuVectorRasterizer::new(adapter) {
+        Ok(gpu) => {
+            let adapter_name = gpu.adapter_info().name.clone();
+            let gpu = Arc::new(gpu);
+            tracing::info!(adapter = %adapter_name, "vector renderer GPU initialized");
+            if backend == "gpu" {
+                return Ok((
+                    gpu.clone(),
+                    None,
+                    Some(gpu),
+                    format!("gpu · {adapter_name}"),
+                ));
+            }
+            let fallback = Arc::new(FallbackVectorRasterizer::new(gpu.clone(), cpu));
+            Ok((
+                fallback.clone(),
+                Some(fallback),
+                Some(gpu),
+                format!("auto · {adapter_name}"),
+            ))
+        }
+        Err(error) if backend == "auto" => {
+            tracing::warn!(%error, "GPU initialization failed; using CPU renderer");
+            Ok((cpu, None, None, "auto · cpu fallback".into()))
+        }
+        Err(error) => Err(anyhow::Error::msg(error.to_string())
+            .context("failed to initialize required GPU renderer")),
+    }
 }
 
 async fn inspect_catalog_source(Json(request): Json<InspectSourceRequest>) -> Response {
@@ -910,11 +967,26 @@ struct MetricsSnapshot {
     render_concurrency_available: usize,
     active_tile_requests: usize,
     projection_cache_budget_mb: u64,
+    vector_render_backend: String,
+    gpu_renderer: Option<GpuRendererStatus>,
     cache_backend: CacheBackendStatus,
     layers: Vec<LayerMetricsSnapshot>,
     slow_requests: Vec<SlowTileRequest>,
     series: Vec<MetricSeriesPoint>,
     render_cache: cangling_gdal_core::RenderCacheStats,
+}
+
+#[derive(Serialize)]
+struct GpuRendererStatus {
+    primary_attempts: u64,
+    primary_successes: u64,
+    fallback_requests: u64,
+    primary_failures: u64,
+    primary_disabled: bool,
+    scene_cache_entries: usize,
+    scene_cache_resident_bytes: usize,
+    scene_cache_hits: u64,
+    scene_cache_misses: u64,
 }
 
 #[derive(Serialize)]
@@ -994,6 +1066,26 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(2048),
+        vector_render_backend: state.vector_render_backend.clone(),
+        gpu_renderer: state.gpu_backend.as_ref().map(|gpu| {
+            let fallback = state
+                .gpu_rasterizer
+                .as_ref()
+                .map(|renderer| renderer.stats())
+                .unwrap_or_else(FallbackRasterizerStats::default);
+            let cache = gpu.scene_cache_stats();
+            GpuRendererStatus {
+                primary_attempts: fallback.primary_attempts,
+                primary_successes: fallback.primary_successes,
+                fallback_requests: fallback.fallback_requests,
+                primary_failures: fallback.primary_failures,
+                primary_disabled: fallback.primary_disabled,
+                scene_cache_entries: cache.entries,
+                scene_cache_resident_bytes: cache.resident_bytes,
+                scene_cache_hits: cache.hits,
+                scene_cache_misses: cache.misses,
+            }
+        }),
         cache_backend,
         layers,
         slow_requests,

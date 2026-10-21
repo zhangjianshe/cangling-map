@@ -43,6 +43,8 @@ pub struct AtlasOverlay {
     /// intended for one-pattern-per-overlay polygon fills. Label atlases use
     /// clamped sampling.
     pub repeat: bool,
+    /// Draw before vector meshes. Pattern fills are underlays; labels are not.
+    pub underlay: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -142,6 +144,7 @@ pub struct PreparedScene {
     padded_bytes_per_row: u32,
     stats: PreparedSceneStats,
     atlases: Vec<PreparedAtlas>,
+    clear_color: wgpu::Color,
 }
 
 /// Byte-budgeted LRU for prepared spatial chunks, label atlases and image
@@ -252,6 +255,7 @@ struct PreparedAtlas {
     index_buffer: wgpu::Buffer,
     index_count: u32,
     estimated_gpu_bytes: usize,
+    underlay: bool,
     _texture: wgpu::Texture,
     _sampler: wgpu::Sampler,
 }
@@ -469,6 +473,17 @@ impl Renderer {
         chunks: &[MeshChunk],
         atlases: &[AtlasOverlay],
     ) -> Result<PreparedScene, GpuError> {
+        self.prepare_with_background_and_atlases(width, height, chunks, [0, 0, 0, 0], atlases)
+    }
+
+    pub fn prepare_with_background_and_atlases(
+        &self,
+        width: u32,
+        height: u32,
+        chunks: &[MeshChunk],
+        background: [u8; 4],
+        atlases: &[AtlasOverlay],
+    ) -> Result<PreparedScene, GpuError> {
         if width == 0 || height == 0 {
             return Err(GpuError::InvalidDimensions);
         }
@@ -572,6 +587,12 @@ impl Renderer {
             padded_bytes_per_row,
             stats,
             atlases,
+            clear_color: wgpu::Color {
+                r: f64::from(background[0]) / 255.0,
+                g: f64::from(background[1]) / 255.0,
+                b: f64::from(background[2]) / 255.0,
+                a: f64::from(background[3]) / 255.0,
+            },
         })
     }
 
@@ -657,6 +678,7 @@ impl Renderer {
             estimated_gpu_bytes: atlas.rgba.len()
                 + atlas.vertices.len() * std::mem::size_of::<AtlasVertex>()
                 + atlas.indices.len() * std::mem::size_of::<u32>(),
+            underlay: atlas.underlay,
             _texture: texture,
             _sampler: sampler,
         })
@@ -671,7 +693,7 @@ impl Renderer {
                     view: &scene.multisample_view,
                     resolve_target: Some(&scene.view),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Clear(scene.clear_color),
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
@@ -679,13 +701,19 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            pass.set_pipeline(&self.atlas_pipeline);
+            for atlas in scene.atlases.iter().filter(|atlas| atlas.underlay) {
+                pass.set_bind_group(0, &atlas.bind_group, &[]);
+                pass.set_index_buffer(atlas.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..atlas.index_count, 0, 0..1);
+            }
             pass.set_pipeline(&self.pipeline);
             for batch in &scene.batches {
                 pass.set_bind_group(0, &batch.bind_group, &[]);
                 pass.set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..batch.index_count, 0, 0..1);
             }
-            for atlas in &scene.atlases {
+            for atlas in scene.atlases.iter().filter(|atlas| !atlas.underlay) {
                 pass.set_pipeline(&self.atlas_pipeline);
                 pass.set_bind_group(0, &atlas.bind_group, &[]);
                 pass.set_index_buffer(atlas.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

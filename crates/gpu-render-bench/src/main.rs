@@ -14,7 +14,12 @@ use gdal::{
     vector::{Geometry, LayerAccess},
     Dataset,
 };
+use map_core::{BoundingBox, Rgba};
 use map_gpu::{MeshChunk as IndexedMeshChunk, Renderer as ProductionGpuRenderer};
+use map_render::{
+    ImageFormat, VectorColor, VectorImageFill, VectorPaint, VectorRasterRequest, VectorRasterizer,
+    VectorRenderRule as ServiceRenderRule, VectorSource, VectorTextStyle as ServiceTextStyle,
+};
 use tiny_skia::{
     Color, FilterQuality, IntSize, Paint, PathBuilder, Pattern, Pixmap, SpreadMode, StrokeDash,
     Transform,
@@ -848,6 +853,7 @@ fn sample_pattern_fill(width: u32, height: u32) -> map_gpu::AtlasOverlay {
         vertices,
         indices: indices.into_iter().map(|index| index as u32).collect(),
         repeat: true,
+        underlay: true,
     }
 }
 
@@ -977,6 +983,7 @@ fn pack_label_atlas(
         vertices,
         indices,
         repeat: false,
+        underlay: false,
     })
 }
 
@@ -1044,6 +1051,7 @@ fn pack_placed_label_atlas(
         vertices,
         indices,
         repeat: false,
+        underlay: false,
     })
 }
 
@@ -1095,6 +1103,81 @@ fn real_label_request() -> VectorRenderRequest {
     }
 }
 
+fn real_service_request() -> VectorRasterRequest {
+    VectorRasterRequest {
+        source: VectorSource {
+            path: "/opt/cis/core/geoserver/data/china/xian201912.shp".into(),
+            layer: None,
+            encoding: Some("GB2312".into()),
+        },
+        target_crs: "EPSG:4326".into(),
+        bbox: BoundingBox {
+            min_x: 109.5,
+            min_y: 30.5,
+            max_x: 117.8,
+            max_y: 37.0,
+        },
+        width: 1024,
+        height: 1024,
+        buffer_pixels: 2,
+        simplify_tolerance: None,
+        format: ImageFormat::Png,
+        rules: vec![ServiceRenderRule {
+            filter: None,
+            minimum_scale_denominator: None,
+            maximum_scale_denominator: None,
+            paint: VectorPaint {
+                fill: Some(VectorColor::Literal(Rgba {
+                    red: 235,
+                    green: 242,
+                    blue: 237,
+                    alpha: 255,
+                })),
+                fill_image: None,
+                stroke: Some(VectorColor::Literal(Rgba {
+                    red: 31,
+                    green: 61,
+                    blue: 51,
+                    alpha: 217,
+                })),
+                stroke_width: 1.0,
+                stroke_dasharray: Vec::new(),
+                text: Some(ServiceTextStyle {
+                    field: "name".into(),
+                    font_family: "IPAex Gothic".into(),
+                    font_size: 18.0,
+                    font_italic: false,
+                    font_bold: true,
+                    fill: Rgba {
+                        red: 32,
+                        green: 53,
+                        blue: 42,
+                        alpha: 255,
+                    },
+                    halo: Rgba {
+                        red: 255,
+                        green: 255,
+                        blue: 255,
+                        alpha: 230,
+                    },
+                    halo_radius: 2.0,
+                    spacing: 6.0,
+                    min_area: 100.0,
+                    repeat_distance: 180.0,
+                    repeat_count: 3,
+                }),
+            },
+        }],
+        scale_denominator: 500_000.0,
+        background: Rgba {
+            red: 255,
+            green: 255,
+            blue: 255,
+            alpha: 255,
+        },
+    }
+}
+
 fn main() -> Result<()> {
     let gpu = pollster::block_on(GpuRenderer::new())?;
     let iterations = std::env::var("GPU_BENCH_ITERATIONS")
@@ -1138,6 +1221,108 @@ fn main() -> Result<()> {
         adapter_name: std::env::var("GPU_BENCH_ADAPTER").ok(),
     })?;
     if Path::new("/opt/cis/core/geoserver/data/china/xian201912.shp").is_file() {
+        let service_request = real_service_request();
+        let gpu_rasterizer =
+            map_gdal::GpuVectorRasterizer::new(std::env::var("GPU_BENCH_ADAPTER").ok())?;
+        let cpu_rasterizer = map_gdal::GdalVectorRasterizer;
+        let cpu_started = Instant::now();
+        let cpu_output = cpu_rasterizer.render(&service_request)?;
+        let cpu_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
+        let gpu_started = Instant::now();
+        let gpu_output = gpu_rasterizer.render(&service_request)?;
+        let gpu_ms = gpu_started.elapsed().as_secs_f64() * 1000.0;
+        let gpu_hot_started = Instant::now();
+        let gpu_hot_output = gpu_rasterizer.render(&service_request)?;
+        let gpu_hot_ms = gpu_hot_started.elapsed().as_secs_f64() * 1000.0;
+        let cpu_pixels = image::load_from_memory(&cpu_output.bytes)?
+            .to_rgba8()
+            .into_raw();
+        let gpu_pixels = image::load_from_memory(&gpu_output.bytes)?
+            .to_rgba8()
+            .into_raw();
+        anyhow::ensure!(
+            gpu_output.bytes == gpu_hot_output.bytes,
+            "resident GPU scene output changed between identical requests"
+        );
+        let diff = image_diff(&cpu_pixels, &gpu_pixels);
+        let cache = gpu_rasterizer.scene_cache_stats();
+        println!(
+            "vector_rasterizer_e2e adapter={} cpu_ms={cpu_ms:.3} gpu_cold_ms={gpu_ms:.3} gpu_hot_ms={gpu_hot_ms:.3} hot_speedup={:.2} scene_cache_entries={} scene_cache_mb={:.2} scene_cache_hits={} scene_cache_misses={} mae={:.3} pixels_over_16_pct={:.3}",
+            gpu_rasterizer.adapter_info().name,
+            cpu_ms / gpu_hot_ms,
+            cache.entries,
+            cache.resident_bytes as f64 / (1024.0 * 1024.0),
+            cache.hits,
+            cache.misses,
+            diff.mean_absolute_error,
+            diff.pixels_over_16_percent,
+        );
+        if std::env::var_os("GPU_BENCH_ASSERT_CORRECTNESS").is_some()
+            && (diff.mean_absolute_error > 4.0 || diff.pixels_over_16_percent > 7.0)
+        {
+            anyhow::bail!(
+                "end-to-end vector rasterizer exceeded GPU correctness limits: MAE {:.3}, pixels >16 {:.3}%",
+                diff.mean_absolute_error,
+                diff.pixels_over_16_percent
+            );
+        }
+        if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
+            save_comparison(
+                Path::new(&output),
+                "vector-rasterizer-e2e",
+                service_request.width,
+                service_request.height,
+                &cpu_pixels,
+                &gpu_pixels,
+            )?;
+        }
+
+        let pattern_path =
+            Path::new("/opt/cis/core/geoserver/workspaces/biz/styles/symbols/0101.png");
+        if pattern_path.is_file() {
+            let mut pattern_request = service_request.clone();
+            pattern_request.rules[0].paint.fill = None;
+            pattern_request.rules[0].paint.fill_image = Some(VectorImageFill {
+                path: "0101.png".into(),
+                scale: 0.75,
+                opacity: 0.8,
+            });
+            pattern_request.rules[0].paint.text = None;
+            let cpu_pattern = cpu_rasterizer.render(&pattern_request)?;
+            let gpu_pattern = gpu_rasterizer.render(&pattern_request)?;
+            let cpu_pattern_pixels = image::load_from_memory(&cpu_pattern.bytes)?
+                .to_rgba8()
+                .into_raw();
+            let gpu_pattern_pixels = image::load_from_memory(&gpu_pattern.bytes)?
+                .to_rgba8()
+                .into_raw();
+            let pattern_diff = image_diff(&cpu_pattern_pixels, &gpu_pattern_pixels);
+            println!(
+                "vector_rasterizer_pattern_e2e mae={:.3} pixels_over_16_pct={:.3}",
+                pattern_diff.mean_absolute_error, pattern_diff.pixels_over_16_percent
+            );
+            if std::env::var_os("GPU_BENCH_ASSERT_CORRECTNESS").is_some()
+                && (pattern_diff.mean_absolute_error > 4.0
+                    || pattern_diff.pixels_over_16_percent > 8.0)
+            {
+                anyhow::bail!(
+                    "end-to-end pattern fill exceeded GPU correctness limits: MAE {:.3}, pixels >16 {:.3}%",
+                    pattern_diff.mean_absolute_error,
+                    pattern_diff.pixels_over_16_percent
+                );
+            }
+            if let Some(output) = std::env::var_os("GPU_BENCH_OUTPUT_DIR") {
+                save_comparison(
+                    Path::new(&output),
+                    "vector-rasterizer-pattern-e2e",
+                    pattern_request.width,
+                    pattern_request.height,
+                    &cpu_pattern_pixels,
+                    &gpu_pattern_pixels,
+                )?;
+            }
+        }
+
         let request = real_label_request();
         let label_started = Instant::now();
         let labels = GdalEngine.layout_vector_labels(&request)?;

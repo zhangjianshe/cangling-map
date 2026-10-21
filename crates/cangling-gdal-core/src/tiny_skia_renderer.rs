@@ -20,8 +20,9 @@ use tiny_skia::{
 };
 
 use crate::{
-    GdalError, ImageFormat, PlacedLabel, RasterizedLabel, RenderedImage, VectorComparisonOperator,
-    VectorFilter, VectorLiteral, VectorRenderRequest, VectorTextStyle,
+    GdalError, ImageFormat, PlacedLabel, PreparedPatternOverlay, PreparedPatternVertex,
+    PreparedVectorScene, PreparedVectorVertex, RasterizedLabel, RenderedImage,
+    VectorComparisonOperator, VectorFilter, VectorLiteral, VectorRenderRequest, VectorTextStyle,
 };
 
 pub(crate) fn render_projected(
@@ -517,6 +518,408 @@ fn rasterize_placed_candidate(candidate: LabelCandidate) -> Result<PlacedLabel, 
     let height = (candidate.bounds.bottom.ceil() as i32 - y).max(1) as u32;
     let image = rasterize_candidate(&candidate, x as f32, y as f32, width, height)?;
     Ok(PlacedLabel { x, y, image })
+}
+
+pub(crate) fn prepare_projected_scene(
+    dataset: &Dataset,
+    request: &VectorRenderRequest,
+) -> Result<PreparedVectorScene, GdalError> {
+    let width = request.width + request.buffer_pixels.saturating_mul(2);
+    let height = request.height + request.buffer_pixels.saturating_mul(2);
+    let transform = PixelTransform::new(request);
+    let mut layer = dataset.layer(0)?;
+    let buffer_x = (request.bbox.max_x - request.bbox.min_x) / f64::from(request.width)
+        * f64::from(request.buffer_pixels);
+    let buffer_y = (request.bbox.max_y - request.bbox.min_y) / f64::from(request.height)
+        * f64::from(request.buffer_pixels);
+    layer.set_spatial_filter_rect(
+        request.bbox.min_x - buffer_x,
+        request.bbox.min_y - buffer_y,
+        request.bbox.max_x + buffer_x,
+        request.bbox.max_y + buffer_y,
+    );
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut patterns = Vec::new();
+    for rule in &request.rules {
+        if let Some(filter) = &rule.where_clause {
+            layer.set_attribute_filter(filter)?;
+        } else {
+            layer.clear_attribute_filter();
+        }
+        let fill_index = field_index(&layer, rule.fill_field.as_ref().map(|v| v.0.as_str()))?;
+        let stroke_index = field_index(&layer, rule.stroke_field.as_ref().map(|v| v.0.as_str()))?;
+        let mut pattern = rule
+            .fill_image
+            .as_ref()
+            .map(|style| {
+                let image = load_pattern(&style.path)?;
+                Ok::<_, GdalError>((
+                    style,
+                    image.clone(),
+                    PreparedPatternOverlay {
+                        width: image.width(),
+                        height: image.height(),
+                        rgba: image.data().to_vec(),
+                        vertices: Vec::new(),
+                        indices: Vec::new(),
+                    },
+                ))
+            })
+            .transpose()?;
+        layer.reset_feature_reading();
+        for feature in layer.features() {
+            let Some(geometry) = feature.geometry() else {
+                continue;
+            };
+            let fill = if pattern.is_none() {
+                resolve_color(&feature, rule.fill, rule.fill_field.as_ref(), fill_index)?
+            } else {
+                None
+            };
+            let stroke = resolve_color(
+                &feature,
+                rule.stroke,
+                rule.stroke_field.as_ref(),
+                stroke_index,
+            )?;
+            append_prepared_geometry(
+                geometry,
+                &transform,
+                fill,
+                stroke,
+                rule.stroke_width,
+                &rule.stroke_dasharray,
+                &mut vertices,
+                &mut indices,
+            )?;
+            if let Some((style, image, overlay)) = pattern.as_mut() {
+                append_prepared_pattern_geometry(
+                    geometry,
+                    &transform,
+                    image.width(),
+                    image.height(),
+                    style.scale,
+                    style.opacity,
+                    overlay,
+                )?;
+            }
+        }
+        if let Some((_, _, pattern)) = pattern.filter(|(_, _, pattern)| !pattern.indices.is_empty())
+        {
+            patterns.push(pattern);
+        }
+    }
+    let labels = layout_projected_labels(dataset, request)?;
+    Ok(PreparedVectorScene {
+        width,
+        height,
+        crop_pixels: request.buffer_pixels,
+        background: request.background,
+        vertices,
+        indices,
+        patterns,
+        labels,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_geometry(
+    geometry: &Geometry,
+    transform: &PixelTransform,
+    fill: Option<[u8; 4]>,
+    stroke: Option<[u8; 4]>,
+    stroke_width: f32,
+    dash_pattern: &[f32],
+    vertices: &mut Vec<PreparedVectorVertex>,
+    indices: &mut Vec<u32>,
+) -> Result<(), GdalError> {
+    match geometry.geometry_name().to_ascii_uppercase().as_str() {
+        "POLYGON" => append_prepared_polygon(
+            geometry,
+            transform,
+            fill,
+            stroke,
+            stroke_width,
+            dash_pattern,
+            vertices,
+            indices,
+        ),
+        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" | "MULTILINESTRING" => {
+            for index in 0..geometry.geometry_count() {
+                append_prepared_geometry(
+                    &geometry.get_geometry(index),
+                    transform,
+                    fill,
+                    stroke,
+                    stroke_width,
+                    dash_pattern,
+                    vertices,
+                    indices,
+                )?;
+            }
+            Ok(())
+        }
+        "LINESTRING" | "LINEARRING" => {
+            if let Some(color) = stroke {
+                append_prepared_stroke(
+                    &prepared_points(geometry, transform),
+                    false,
+                    color,
+                    stroke_width,
+                    dash_pattern,
+                    vertices,
+                    indices,
+                );
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_polygon(
+    polygon: &Geometry,
+    transform: &PixelTransform,
+    fill: Option<[u8; 4]>,
+    stroke: Option<[u8; 4]>,
+    stroke_width: f32,
+    dash_pattern: &[f32],
+    vertices: &mut Vec<PreparedVectorVertex>,
+    indices: &mut Vec<u32>,
+) -> Result<(), GdalError> {
+    let rings = (0..polygon.geometry_count())
+        .map(|index| prepared_points(&polygon.get_geometry(index), transform))
+        .filter(|points| points.len() >= 3)
+        .collect::<Vec<_>>();
+    if let Some(color) = fill {
+        let mut flat = Vec::new();
+        let mut holes = Vec::new();
+        for (ring_index, ring) in rings.iter().enumerate() {
+            if ring_index > 0 {
+                holes.push(flat.len() / 2);
+            }
+            for &(x, y) in ring {
+                flat.extend([f64::from(x), f64::from(y)]);
+            }
+        }
+        if !flat.is_empty() {
+            let triangles = earcutr::earcut(&flat, &holes, 2).map_err(|error| {
+                GdalError::InvalidRequest(format!("polygon triangulation failed: {error}"))
+            })?;
+            let base = vertices.len() as u32;
+            vertices.extend(flat.chunks_exact(2).map(|point| PreparedVectorVertex {
+                pixel_position: [point[0] as f32, point[1] as f32],
+                color,
+            }));
+            indices.extend(triangles.into_iter().map(|index| base + index as u32));
+        }
+    }
+    if let Some(color) = stroke {
+        for ring in &rings {
+            append_prepared_stroke(
+                ring,
+                true,
+                color,
+                stroke_width,
+                dash_pattern,
+                vertices,
+                indices,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_pattern_geometry(
+    geometry: &Geometry,
+    transform: &PixelTransform,
+    image_width: u32,
+    image_height: u32,
+    scale: f32,
+    opacity: f32,
+    overlay: &mut PreparedPatternOverlay,
+) -> Result<(), GdalError> {
+    match geometry.geometry_name().to_ascii_uppercase().as_str() {
+        "POLYGON" => append_prepared_pattern_polygon(
+            geometry,
+            transform,
+            image_width,
+            image_height,
+            scale,
+            opacity,
+            overlay,
+        ),
+        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => {
+            for index in 0..geometry.geometry_count() {
+                append_prepared_pattern_geometry(
+                    &geometry.get_geometry(index),
+                    transform,
+                    image_width,
+                    image_height,
+                    scale,
+                    opacity,
+                    overlay,
+                )?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_pattern_polygon(
+    polygon: &Geometry,
+    transform: &PixelTransform,
+    image_width: u32,
+    image_height: u32,
+    scale: f32,
+    opacity: f32,
+    overlay: &mut PreparedPatternOverlay,
+) -> Result<(), GdalError> {
+    let rings = (0..polygon.geometry_count())
+        .map(|index| prepared_points(&polygon.get_geometry(index), transform))
+        .filter(|points| points.len() >= 3)
+        .collect::<Vec<_>>();
+    let mut flat = Vec::new();
+    let mut holes = Vec::new();
+    for (ring_index, ring) in rings.iter().enumerate() {
+        if ring_index > 0 {
+            holes.push(flat.len() / 2);
+        }
+        for &(x, y) in ring {
+            flat.extend([f64::from(x), f64::from(y)]);
+        }
+    }
+    if flat.is_empty() {
+        return Ok(());
+    }
+    let triangles = earcutr::earcut(&flat, &holes, 2).map_err(|error| {
+        GdalError::InvalidRequest(format!("pattern polygon triangulation failed: {error}"))
+    })?;
+    let scale = scale.max(f32::EPSILON);
+    let period_x = image_width as f32 * scale;
+    let period_y = image_height as f32 * scale;
+    let (phase_x, phase_y) = transform.pattern_phase(f64::from(period_x), f64::from(period_y));
+    let base = overlay.vertices.len() as u32;
+    overlay.vertices.extend(flat.chunks_exact(2).map(|point| {
+        let x = point[0] as f32;
+        let y = point[1] as f32;
+        PreparedPatternVertex {
+            pixel_position: [x, y],
+            uv: [(x - phase_x) / period_x, (y - phase_y) / period_y],
+            opacity: opacity.clamp(0.0, 1.0),
+        }
+    }));
+    overlay
+        .indices
+        .extend(triangles.into_iter().map(|index| base + index as u32));
+    Ok(())
+}
+
+fn prepared_points(geometry: &Geometry, transform: &PixelTransform) -> Vec<(f32, f32)> {
+    let mut points = (0..geometry.point_count())
+        .map(|index| {
+            let (x, y, _) = geometry.get_point(index as i32);
+            transform.apply(x, y)
+        })
+        .collect::<Vec<_>>();
+    points.dedup();
+    if points.len() > 1 && points.first() == points.last() {
+        points.pop();
+    }
+    points
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_prepared_stroke(
+    points: &[(f32, f32)],
+    closed: bool,
+    color: [u8; 4],
+    width: f32,
+    pattern: &[f32],
+    vertices: &mut Vec<PreparedVectorVertex>,
+    indices: &mut Vec<u32>,
+) {
+    if points.len() < 2 || width <= 0.0 {
+        return;
+    }
+    let segments = points.len() - usize::from(!closed);
+    let mut dash_index = 0;
+    let mut dash_remaining = pattern.first().copied().unwrap_or(f32::INFINITY);
+    let mut paint_segment = true;
+    for index in 0..segments {
+        let start = points[index];
+        let end = points[(index + 1) % points.len()];
+        let delta = (end.0 - start.0, end.1 - start.1);
+        let length = delta.0.hypot(delta.1);
+        if length <= f32::EPSILON {
+            continue;
+        }
+        let direction = (delta.0 / length, delta.1 / length);
+        let mut travelled = 0.0;
+        while travelled < length {
+            let step = dash_remaining.min(length - travelled);
+            if paint_segment {
+                append_prepared_stroke_quad(
+                    (
+                        start.0 + direction.0 * travelled,
+                        start.1 + direction.1 * travelled,
+                    ),
+                    (
+                        start.0 + direction.0 * (travelled + step),
+                        start.1 + direction.1 * (travelled + step),
+                    ),
+                    color,
+                    width,
+                    vertices,
+                    indices,
+                );
+            }
+            travelled += step;
+            dash_remaining -= step;
+            if dash_remaining <= f32::EPSILON && !pattern.is_empty() {
+                dash_index = (dash_index + 1) % pattern.len();
+                dash_remaining = pattern[dash_index].max(f32::EPSILON);
+                paint_segment = !paint_segment;
+            }
+        }
+    }
+}
+
+fn append_prepared_stroke_quad(
+    start: (f32, f32),
+    end: (f32, f32),
+    color: [u8; 4],
+    width: f32,
+    vertices: &mut Vec<PreparedVectorVertex>,
+    indices: &mut Vec<u32>,
+) {
+    let delta = (end.0 - start.0, end.1 - start.1);
+    let length = delta.0.hypot(delta.1);
+    if length <= f32::EPSILON {
+        return;
+    }
+    let normal = (
+        -delta.1 / length * width / 2.0,
+        delta.0 / length * width / 2.0,
+    );
+    let base = vertices.len() as u32;
+    for pixel_position in [
+        [start.0 + normal.0, start.1 + normal.1],
+        [end.0 + normal.0, end.1 + normal.1],
+        [end.0 - normal.0, end.1 - normal.1],
+        [start.0 - normal.0, start.1 - normal.1],
+    ] {
+        vertices.push(PreparedVectorVertex {
+            pixel_position,
+            color,
+        });
+    }
+    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 pub(crate) fn rasterize_text_label(

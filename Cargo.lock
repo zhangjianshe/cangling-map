@@ -385,6 +385,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 name = "cangling-gdal-core"
 version = "0.1.3"
 dependencies = [
+ "earcutr",
  "gdal",
  "gdal-sys",
  "image",
@@ -1078,7 +1079,10 @@ dependencies = [
  "earcutr",
  "gdal",
  "image",
+ "map-core",
+ "map-gdal",
  "map-gpu",
+ "map-render",
  "pollster",
  "tiny-skia",
  "wgpu",
@@ -1662,7 +1666,9 @@ version = "0.1.3"
 dependencies = [
  "async-trait",
  "cangling-gdal-core",
+ "image",
  "map-core",
+ "map-gpu",
  "map-render",
  "map-style",
  "serde",

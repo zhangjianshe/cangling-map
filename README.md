@@ -83,6 +83,33 @@ VECTOR_PROJECTION_METATILE_FACTOR=4
 
 将 `VECTOR_PROJECTION_CACHE_PATH` 设置为空字符串可关闭持久化预投影缓存。
 
+## GPU 矢量渲染（实验性生产模式）
+
+服务支持 CPU、强制 GPU 和带 CPU 自动降级的 GPU 模式：
+
+```bash
+MAP_RENDER_BACKEND=auto \
+MAP_GPU_ADAPTER=NVIDIA \
+MAP_GPU_SCENE_CACHE_MB=1024 \
+cargo run --release -p map-server
+```
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MAP_RENDER_BACKEND` | `cpu` | `cpu`、`gpu` 或 `auto`；生产试运行建议使用 `auto` |
+| `MAP_GPU_ADAPTER` | 空 | 可选的显卡名称片段，例如 `NVIDIA`；为空时选择系统默认适配器 |
+| `MAP_GPU_SCENE_CACHE_MB` | `1024` | 已投影网格、边界和标签图集的显存 LRU 预算 |
+
+`auto` 模式遇到某一请求暂不支持的符号器时，只将该请求降级到 CPU；如果 GPU
+设备不可用，则触发进程内熔断，后续请求直接使用 CPU。`/api/metrics` 返回当前后端、
+GPU 成功/失败/降级次数、场景缓存条目、命中率和驻留字节数。
+
+GPU 场景缓存以完整渲染请求为键。首次请求仍需完成 GDAL 查询、投影、三角化和标签
+布局；同一 WMS 请求再次执行时，可直接复用显存中的网格和标签图集。WMTS 最终图片
+仍优先使用瓦片缓存。部署时必须给容器暴露兼容 Vulkan 的 GPU；NVIDIA Docker 环境
+通常还需配置 NVIDIA Container Toolkit 和 `gpus: all`。ARM64 或没有 GPU 的节点应保留
+`cpu`，或使用 `auto` 确保安全降级。
+
 ## Docker Compose
 
 仓库提供 [docker-compose.yml](docker-compose.yml)。其中数据和缓存使用两个独立卷：

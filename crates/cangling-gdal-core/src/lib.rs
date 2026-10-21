@@ -214,6 +214,40 @@ pub struct PlacedLabel {
     pub image: RasterizedLabel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedVectorVertex {
+    pub pixel_position: [f32; 2],
+    pub color: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedPatternVertex {
+    pub pixel_position: [f32; 2],
+    pub uv: [f32; 2],
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedPatternOverlay {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+    pub vertices: Vec<PreparedPatternVertex>,
+    pub indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedVectorScene {
+    pub width: u32,
+    pub height: u32,
+    pub crop_pixels: u32,
+    pub background: [u8; 4],
+    pub vertices: Vec<PreparedVectorVertex>,
+    pub indices: Vec<u32>,
+    pub patterns: Vec<PreparedPatternOverlay>,
+    pub labels: Vec<PlacedLabel>,
+}
+
 pub fn rasterize_text_label(
     text: &str,
     style: &VectorTextStyle,
@@ -450,6 +484,19 @@ impl GdalEngine {
             ));
         }
         ffi::with_projected_vector(request, tiny_skia_renderer::layout_projected_labels)
+    }
+
+    pub fn prepare_vector_scene(
+        &self,
+        request: &VectorRenderRequest,
+    ) -> Result<PreparedVectorScene, GdalError> {
+        request.bbox.validate()?;
+        if request.width == 0 || request.height == 0 {
+            return Err(GdalError::InvalidRequest(
+                "image width and height must be greater than zero".into(),
+            ));
+        }
+        ffi::with_projected_vector(request, tiny_skia_renderer::prepare_projected_scene)
     }
 
     pub fn preview_vector_features(

@@ -13,6 +13,9 @@ earcutr = "0.4"
 gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
 image.workspace = true
 map-gpu = { path = "../map-gpu" }
+map-gdal = { path = "../map-gdal" }
+map-render = { path = "../map-render" }
+map-core = { path = "../map-core" }
 pollster.workspace = true
 tiny-skia.workspace = true
 wgpu.workspace = true
