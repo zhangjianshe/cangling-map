@@ -1,5 +1,7 @@
 //! Compatibility adapter between cangling-map domain types and cangling-gdal.
 
+mod gpu_mesh_cache;
+
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
@@ -26,6 +28,9 @@ use map_render::{
 };
 use map_style::{ComparisonOperator, Filter, Literal};
 use serde::Serialize;
+use tracing::warn;
+
+use gpu_mesh_cache::{GpuMeshArchive, GpuMeshDiskCache};
 
 pub use cangling_gdal_core::DatasetKind;
 
@@ -141,8 +146,13 @@ fn to_gdal_request(request: &VectorRasterRequest) -> Result<VectorRenderRequest,
 pub struct GpuVectorRasterizer {
     renderer: Renderer,
     scenes: Mutex<ByteLruCache<u64, CachedGpuScene>>,
+    mesh_cache: GpuMeshDiskCache,
     scene_hits: AtomicU64,
     scene_misses: AtomicU64,
+    mesh_disk_hits: AtomicU64,
+    mesh_disk_misses: AtomicU64,
+    mesh_disk_writes: AtomicU64,
+    mesh_disk_errors: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -160,6 +170,11 @@ pub struct GpuSceneCacheStats {
     pub resident_bytes: usize,
     pub hits: u64,
     pub misses: u64,
+    pub mesh_disk_enabled: bool,
+    pub mesh_disk_hits: u64,
+    pub mesh_disk_misses: u64,
+    pub mesh_disk_writes: u64,
+    pub mesh_disk_errors: u64,
 }
 
 impl GpuVectorRasterizer {
@@ -175,8 +190,13 @@ impl GpuVectorRasterizer {
                 scenes: Mutex::new(ByteLruCache::new(
                     scene_cache_mb.saturating_mul(1024 * 1024),
                 )),
+                mesh_cache: GpuMeshDiskCache::from_environment(),
                 scene_hits: AtomicU64::new(0),
                 scene_misses: AtomicU64::new(0),
+                mesh_disk_hits: AtomicU64::new(0),
+                mesh_disk_misses: AtomicU64::new(0),
+                mesh_disk_writes: AtomicU64::new(0),
+                mesh_disk_errors: AtomicU64::new(0),
             })
             .map_err(|error| RasterizeError::Unavailable(error.to_string()))
     }
@@ -195,6 +215,11 @@ impl GpuVectorRasterizer {
             resident_bytes: scenes.resident_bytes(),
             hits: self.scene_hits.load(Ordering::Relaxed),
             misses: self.scene_misses.load(Ordering::Relaxed),
+            mesh_disk_enabled: self.mesh_cache.is_enabled(),
+            mesh_disk_hits: self.mesh_disk_hits.load(Ordering::Relaxed),
+            mesh_disk_misses: self.mesh_disk_misses.load(Ordering::Relaxed),
+            mesh_disk_writes: self.mesh_disk_writes.load(Ordering::Relaxed),
+            mesh_disk_errors: self.mesh_disk_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -242,32 +267,87 @@ impl GpuVectorRasterizer {
         self.scene_misses.fetch_add(1, Ordering::Relaxed);
         let prepared_request = gpu_coverage_request(request);
         let coverage = rendered_bbox(&prepared_request);
-        let gdal_request = to_gdal_request(&prepared_request)?;
-        let prepared = GdalEngine
-            .prepare_vector_scene(&gdal_request)
-            .map_err(|error| {
-                let message = error.to_string();
-                if message.contains("does not yet support") {
-                    RasterizeError::Unsupported(message)
-                } else {
-                    RasterizeError::Backend(message)
+        let (prepared_width, prepared_height) = gpu_target_dimensions(&prepared_request);
+        let scene_key = gpu_scene_key(identity, coverage, prepared_width, prepared_height);
+        let mut archive = None;
+        if self.mesh_cache.is_enabled() {
+            match self.mesh_cache.load(scene_key) {
+                Ok(Some(cached))
+                    if cached.width == prepared_width && cached.height == prepared_height =>
+                {
+                    self.mesh_disk_hits.fetch_add(1, Ordering::Relaxed);
+                    archive = Some(cached);
                 }
-            })?;
-        let chunks = prepared_mesh_chunks(&prepared);
-        let mut atlases = prepared_pattern_atlases(&prepared);
-        atlases.extend(pack_placed_labels(
-            prepared.width,
-            prepared.height,
-            &prepared.labels,
-        )?);
+                Ok(Some(_)) => {
+                    self.mesh_disk_errors.fetch_add(1, Ordering::Relaxed);
+                    self.mesh_disk_misses.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.mesh_cache.remove(scene_key);
+                    warn!(
+                        scene_key,
+                        "discarded GPU mesh cache entry with unexpected dimensions"
+                    );
+                }
+                Ok(None) => {
+                    self.mesh_disk_misses.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    self.mesh_disk_errors.fetch_add(1, Ordering::Relaxed);
+                    self.mesh_disk_misses.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.mesh_cache.remove(scene_key);
+                    warn!(scene_key, %error, "discarded unreadable GPU mesh cache entry");
+                }
+            }
+        }
+        let archive = match archive {
+            Some(archive) => archive,
+            None => {
+                let gdal_request = to_gdal_request(&prepared_request)?;
+                let prepared = GdalEngine
+                    .prepare_vector_scene(&gdal_request)
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        if message.contains("does not yet support") {
+                            RasterizeError::Unsupported(message)
+                        } else {
+                            RasterizeError::Backend(message)
+                        }
+                    })?;
+                let chunks = prepared_mesh_chunks(&prepared);
+                let mut atlases = prepared_pattern_atlases(&prepared);
+                atlases.extend(pack_placed_labels(
+                    prepared.width,
+                    prepared.height,
+                    &prepared.labels,
+                )?);
+                let archive = GpuMeshArchive {
+                    width: prepared.width,
+                    height: prepared.height,
+                    background: prepared.background,
+                    chunks,
+                    atlases,
+                };
+                if self.mesh_cache.is_enabled() {
+                    match self.mesh_cache.store(scene_key, &archive) {
+                        Ok(()) => {
+                            self.mesh_disk_writes.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            self.mesh_disk_errors.fetch_add(1, Ordering::Relaxed);
+                            warn!(scene_key, %error, "failed to persist GPU mesh cache entry");
+                        }
+                    }
+                }
+                archive
+            }
+        };
         let scene = Arc::new(
             self.renderer
                 .prepare_with_background_and_atlases(
-                    prepared.width,
-                    prepared.height,
-                    &chunks,
-                    prepared.background,
-                    &atlases,
+                    archive.width,
+                    archive.height,
+                    &archive.chunks,
+                    archive.background,
+                    &archive.atlases,
                 )
                 .map_err(classify_gpu_prepare_error)?,
         );
@@ -279,7 +359,6 @@ impl GpuVectorRasterizer {
             resolution_y,
             scene: scene.clone(),
         };
-        let scene_key = gpu_scene_key(identity, coverage, prepared.width, prepared.height);
         {
             let mut scenes = self
                 .scenes
@@ -390,11 +469,40 @@ fn gpu_scene_identity(request: &VectorRasterRequest) -> u64 {
     normalized.format = ImageFormat::Png;
     let mut hasher = DefaultHasher::new();
     format!("{normalized:?}").hash(&mut hasher);
-    if let Ok(metadata) = std::fs::metadata(&request.source.path) {
-        metadata.len().hash(&mut hasher);
-        metadata.modified().ok().hash(&mut hasher);
-    }
+    hash_source_fingerprint(&request.source.path, &mut hasher);
     hasher.finish()
+}
+
+fn hash_source_fingerprint(path: &std::path::Path, hasher: &mut impl Hasher) {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical.hash(hasher);
+    let extensions: &[&str] = if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("shp"))
+    {
+        &["shp", "shx", "dbf", "prj", "cpg", "qix", "sbn", "sbx"]
+    } else {
+        &[]
+    };
+    if extensions.is_empty() {
+        hash_file_metadata(path, hasher);
+    } else {
+        for extension in extensions {
+            let sidecar = path.with_extension(extension);
+            if sidecar.exists() {
+                extension.hash(hasher);
+                hash_file_metadata(&sidecar, hasher);
+            }
+        }
+    }
+}
+
+fn hash_file_metadata(path: &std::path::Path, hasher: &mut impl Hasher) {
+    path.hash(hasher);
+    if let Ok(metadata) = std::fs::metadata(path) {
+        metadata.len().hash(hasher);
+        metadata.modified().ok().hash(hasher);
+    }
 }
 
 fn gpu_scene_key(identity: u64, coverage: BoundingBox, width: u32, height: u32) -> u64 {

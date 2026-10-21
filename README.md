@@ -61,9 +61,11 @@ curl 'http://127.0.0.1:3000/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.
 | 本地缓存根目录 | `/cache` | `MAP_CACHE_ROOT` |
 | WMTS 瓦片缓存 | `/cache/wmts` | `WMTS_CACHE_PATH` |
 | 矢量预投影缓存 | `/cache/vector-projection` | `VECTOR_PROJECTION_CACHE_PATH` |
+| GPU 就绪网格缓存 | `/cache/gpu-mesh` | `MAP_GPU_MESH_CACHE_PATH` |
 
-`WMTS_CACHE_PATH` 和 `VECTOR_PROJECTION_CACHE_PATH` 是可选的细粒度覆盖项；未设置时，
-分别使用 `MAP_CACHE_ROOT/wmts` 和 `MAP_CACHE_ROOT/vector-projection`。本地直接运行时，
+`WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH` 和 `MAP_GPU_MESH_CACHE_PATH` 是可选的
+细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
+`MAP_CACHE_ROOT/vector-projection` 和 `MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
 `MAP_CACHE_ROOT` 默认为当前目录下的 `cache`。
 
 例如将缓存放到另一块磁盘：
@@ -92,6 +94,7 @@ MAP_RENDER_BACKEND=auto \
 MAP_GPU_ADAPTER=NVIDIA \
 MAP_GPU_SCENE_CACHE_MB=1024 \
 MAP_GPU_TARGET_POOL_MB=512 \
+MAP_GPU_MESH_CACHE_PATH=/cache/gpu-mesh \
 MAP_GPU_VIEW_OVERSCAN=1.5 \
 cargo run --release -p map-server
 ```
@@ -102,11 +105,19 @@ cargo run --release -p map-server
 | `MAP_GPU_ADAPTER` | 空 | 可选的显卡名称片段，例如 `NVIDIA`；为空时选择系统默认适配器 |
 | `MAP_GPU_SCENE_CACHE_MB` | `1024` | 已投影网格、边界和标签图集的显存 LRU 预算 |
 | `MAP_GPU_TARGET_POOL_MB` | `512` | 可复用离屏纹理、MSAA 纹理和回读缓冲的显存预算 |
+| `MAP_GPU_MESH_CACHE_PATH` | `${MAP_CACHE_ROOT}/gpu-mesh` | 已投影、三角化并完成标签布局的 GPU 就绪网格磁盘缓存；空字符串表示关闭 |
+| `MAP_GPU_MESH_CACHE_MAX_ENTRY_MB` | `4096` | 单个 GPU 网格缓存文件的最大读取尺寸，防止损坏文件造成异常内存分配 |
 | `MAP_GPU_VIEW_OVERSCAN` | `1.5` | WMS 驻留视口相对请求范围的扩展倍数，限制为 `1.0`–`3.0`；`1.0` 表示关闭平移复用 |
 
 `auto` 模式遇到某一请求暂不支持的符号器时，只将该请求降级到 CPU；如果 GPU
 设备不可用，则触发进程内熔断，后续请求直接使用 CPU。`/api/metrics` 返回当前后端、
 GPU 成功/失败/降级次数、场景缓存条目、命中率和驻留字节数。
+
+GPU 缓存分为三层：FlatGeobuf 预投影缓存保存目标坐标系数据，`.cgmesh` 磁盘缓存保存可直接
+上传的顶点、索引、图案和标签 atlas，进程内 LRU 则保存已经上传到显存的场景。数据主文件或
+Shapefile 伴随文件、目标 CRS、当前生效样式、范围或尺寸变化时，缓存键会自动变化；格式损坏
+或版本不兼容的 `.cgmesh` 会被删除并重建。`/api/metrics` 的 `gpu_renderer` 节点会同时返回
+`mesh_disk_hits`、`mesh_disk_misses`、`mesh_disk_writes` 和 `mesh_disk_errors`。
 
 GPU 首次处理 WMS 请求时，会按 `MAP_GPU_VIEW_OVERSCAN` 准备一个更大的驻留视口；相同
 CRS、分辨率和生效样式规则下，只要后续平移范围仍包含在驻留视口内，就能直接复用显存中的
@@ -115,6 +126,17 @@ CRS、分辨率和生效样式规则下，只要后续平移范围仍包含在�
 最终瓦片缓存。部署时必须给容器暴露兼容 Vulkan 的 GPU；NVIDIA Docker 环境
 通常还需配置 NVIDIA Container Toolkit 和 `gpus: all`。ARM64 或没有 GPU 的节点应保留
 `cpu`，或使用 `auto` 确保安全降级。
+
+部署后可用预热计划提前生成 `.cgmesh`，使后续进程或 Pod 只需从本地缓存读取并上传 GPU：
+
+```bash
+MAP_SERVER_URL=http://127.0.0.1:3000 \
+  ./tools/prewarm-gpu-mesh-cache.sh deploy/gpu-prewarm.example.tsv
+```
+
+计划格式为 `图层|CRS|BBOX|宽度|高度|pixelRatio`。预热请求仍会完成一次实际渲染，建议在
+服务就绪后、接入流量前执行。多个实例若共享只读数据但各自使用本地 `/cache`，应分别预热；
+若共享缓存卷，则原子写入可让后启动的实例直接复用文件。
 
 Docker 主机安装 NVIDIA Container Toolkit 后，可使用 GPU 覆盖文件启动：
 

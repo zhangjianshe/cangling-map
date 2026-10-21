@@ -16,6 +16,7 @@
 GDAL / 样式规则
   → GeometryPreparer（投影、简化、三角化、线展开、标签布局）
   → Vec<MeshChunk>
+  → .cgmesh（版本化、原子写入的本地持久缓存）
   → map-gpu（上传、显存缓存、render pass、readback）
   → RGBA
   → PNG/JPEG 编码
@@ -29,13 +30,19 @@ GDAL / 样式规则
 source fingerprint + target CRS + style revision + zoom band + spatial chunk
 ```
 
-缓存记录顶点、索引、属性选择结果、显存字节数、最后访问时间和构建耗时。超过
-`GPU_CACHE_BUDGET_MB` 后按 LRU 淘汰完整空间块。失效以数据文件指纹、样式 revision 和
-投影配置为准。
+持久缓存记录场景尺寸、背景、顶点、索引、图案纹理及已经排版的标签 atlas。文件包含 magic、
+格式版本、端序和顶点布局校验，采用同目录临时文件加原子 rename 写入；损坏、截断、版本不符
+或超过 `MAP_GPU_MESH_CACHE_MAX_ENTRY_MB` 的文件不会进入渲染器，而是删除后重建。缓存键包含
+数据主文件及 Shapefile 伴随文件的路径、大小和修改时间，以及目标 CRS、生效样式、范围和尺寸。
+
+显存层超过 `MAP_GPU_SCENE_CACHE_MB` 后按 LRU 淘汰完整场景。磁盘层位于
+`MAP_GPU_MESH_CACHE_PATH`，默认继承 `${MAP_CACHE_ROOT}/gpu-mesh`，可以在上线前通过真实 WMS
+请求计划预热。进程重启后只需读取 `.cgmesh` 并上传，不再重复 GDAL 查询、投影、三角化、
+线展开、文字栅格化和碰撞布局。
 
 `map-gpu::ByteLruCache` 已实现按估算显存字节数计费和最近使用时间淘汰。单个请求块超过预算
-时允许暂时独占缓存以完成请求，其余条目全部释放；服务接入时还需把命中、未命中、淘汰、
-常驻字节和超预算请求暴露到 metrics。
+时允许暂时独占缓存以完成请求，其余条目全部释放。内存场景和磁盘网格两层的命中、未命中、
+写入、错误及常驻字节均通过 `/api/metrics` 暴露。
 
 ## 分阶段能力
 

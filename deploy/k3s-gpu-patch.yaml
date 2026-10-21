@@ -15,6 +15,10 @@ spec:
               value: NVIDIA
             - name: MAP_GPU_SCENE_CACHE_MB
               value: "1024"
+            - name: MAP_GPU_TARGET_POOL_MB
+              value: "512"
+            - name: MAP_GPU_MESH_CACHE_PATH
+              value: /cache/gpu-mesh
           resources:
             limits:
               nvidia.com/gpu: "1"

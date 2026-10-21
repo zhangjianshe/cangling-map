@@ -13,9 +13,11 @@ map-render = { path = "../map-render" }
 map-gpu = { path = "../map-gpu" }
 map-style = { path = "../map-style" }
 image.workspace = true
+bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

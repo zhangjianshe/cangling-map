@@ -52,7 +52,7 @@ impl Default for ViewTransform {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AtlasOverlay {
     pub width: u32,
     pub height: u32,
@@ -67,7 +67,7 @@ pub struct AtlasOverlay {
     pub underlay: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MeshChunk {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,

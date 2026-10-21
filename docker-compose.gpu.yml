@@ -4,6 +4,8 @@ services:
       MAP_RENDER_BACKEND: auto
       MAP_GPU_ADAPTER: NVIDIA
       MAP_GPU_SCENE_CACHE_MB: 1024
+      MAP_GPU_TARGET_POOL_MB: 512
+      MAP_GPU_MESH_CACHE_PATH: /cache/gpu-mesh
     deploy:
       resources:
         reservations:

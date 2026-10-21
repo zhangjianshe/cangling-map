@@ -1022,6 +1022,11 @@ struct GpuRendererStatus {
     scene_cache_resident_bytes: usize,
     scene_cache_hits: u64,
     scene_cache_misses: u64,
+    mesh_disk_enabled: bool,
+    mesh_disk_hits: u64,
+    mesh_disk_misses: u64,
+    mesh_disk_writes: u64,
+    mesh_disk_errors: u64,
 }
 
 #[derive(Serialize)]
@@ -1120,6 +1125,11 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
                 scene_cache_resident_bytes: cache.resident_bytes,
                 scene_cache_hits: cache.hits,
                 scene_cache_misses: cache.misses,
+                mesh_disk_enabled: cache.mesh_disk_enabled,
+                mesh_disk_hits: cache.mesh_disk_hits,
+                mesh_disk_misses: cache.mesh_disk_misses,
+                mesh_disk_writes: cache.mesh_disk_writes,
+                mesh_disk_errors: cache.mesh_disk_errors,
             }
         }),
         cache_backend,
