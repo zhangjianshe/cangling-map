@@ -89,6 +89,7 @@ struct ServiceMetrics {
 struct MetricsDetails {
     layers: HashMap<String, LayerMetricState>,
     slow_requests: VecDeque<SlowTileRequest>,
+    recent_wms_requests: VecDeque<WmsRequestSnapshot>,
     events: VecDeque<MetricEvent>,
 }
 
@@ -122,6 +123,39 @@ struct SlowTileRequest {
     preparation_ms: f64,
     render_ms: f64,
     cache_write_ms: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct WmsRequestSnapshot {
+    timestamp: u64,
+    layer: String,
+    width: u32,
+    height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    pixel_ratio: f32,
+    total_ms: f64,
+}
+
+struct WmsRequestTimer {
+    metrics: Arc<ServiceMetrics>,
+    snapshot: WmsRequestSnapshot,
+    started: Instant,
+}
+
+impl Drop for WmsRequestTimer {
+    fn drop(&mut self) {
+        self.snapshot.total_ms = duration_ms(self.started.elapsed());
+        let mut details = self
+            .metrics
+            .details
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        details
+            .recent_wms_requests
+            .push_front(self.snapshot.clone());
+        details.recent_wms_requests.truncate(50);
+    }
 }
 
 struct MetricEvent {
@@ -972,6 +1006,7 @@ struct MetricsSnapshot {
     cache_backend: CacheBackendStatus,
     layers: Vec<LayerMetricsSnapshot>,
     slow_requests: Vec<SlowTileRequest>,
+    recent_wms_requests: Vec<WmsRequestSnapshot>,
     series: Vec<MetricSeriesPoint>,
     render_cache: cangling_gdal_core::RenderCacheStats,
 }
@@ -1048,6 +1083,7 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
         .collect::<Vec<_>>();
     layers.sort_by(|left, right| right.requests.cmp(&left.requests));
     let slow_requests = details.slow_requests.iter().cloned().collect();
+    let recent_wms_requests = details.recent_wms_requests.iter().cloned().collect();
     let series = metric_series(&details.events);
     let cache_backend = active_wmts_cache(&state).status();
     Json(MetricsSnapshot {
@@ -1089,6 +1125,7 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
         cache_backend,
         layers,
         slow_requests,
+        recent_wms_requests,
         series,
         render_cache: GdalEngine.render_cache_stats(),
     })
@@ -2677,6 +2714,20 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
     let pixel_ratio = wms_pixel_ratio(&parameters);
     let logical_width = ((width as f32) / pixel_ratio).round().max(1.0) as u32;
     let logical_height = ((height as f32) / pixel_ratio).round().max(1.0) as u32;
+    let _wms_request_timer = WmsRequestTimer {
+        metrics: state.metrics.clone(),
+        snapshot: WmsRequestSnapshot {
+            timestamp: unix_seconds(),
+            layer: layer_name.to_owned(),
+            width,
+            height,
+            logical_width,
+            logical_height,
+            pixel_ratio,
+            total_ms: 0.0,
+        },
+        started: Instant::now(),
+    };
     let crs = match parameters.get("CRS").or_else(|| parameters.get("SRS")) {
         Some(crs) if !crs.trim().is_empty() => crs.clone(),
         _ => {
