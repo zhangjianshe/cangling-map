@@ -240,7 +240,7 @@ impl VectorRasterizer for GpuVectorRasterizer {
                 prepared.background,
                 &atlases,
             )
-            .map_err(|error| RasterizeError::Unavailable(error.to_string()))?;
+            .map_err(classify_gpu_prepare_error)?;
         let scene_bytes = scene.stats().estimated_gpu_bytes;
         let mut scenes = self
             .scenes
@@ -255,6 +255,26 @@ impl VectorRasterizer for GpuVectorRasterizer {
             .render_rgba(scene)
             .map_err(|error| RasterizeError::Unavailable(error.to_string()))?;
         encode_gpu_output(request, prepared.crop_pixels, rgba)
+    }
+}
+
+fn classify_gpu_prepare_error(error: map_gpu::GpuError) -> RasterizeError {
+    match error {
+        map_gpu::GpuError::InvalidDimensions
+        | map_gpu::GpuError::TextureDimensionsTooLarge { .. }
+        | map_gpu::GpuError::MissingVertices { .. }
+        | map_gpu::GpuError::InvalidIndex { .. }
+        | map_gpu::GpuError::VertexBufferTooLarge { .. }
+        | map_gpu::GpuError::IndexBufferTooLarge { .. }
+        | map_gpu::GpuError::InvalidAtlasDimensions
+        | map_gpu::GpuError::InvalidAtlasPixels { .. }
+        | map_gpu::GpuError::InvalidAtlasIndex { .. } => {
+            RasterizeError::Unsupported(error.to_string())
+        }
+        map_gpu::GpuError::AdapterNotFound
+        | map_gpu::GpuError::NamedAdapterNotFound(_)
+        | map_gpu::GpuError::Device(_)
+        | map_gpu::GpuError::Readback(_) => RasterizeError::Unavailable(error.to_string()),
     }
 }
 

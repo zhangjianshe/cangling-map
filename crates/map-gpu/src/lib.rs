@@ -91,6 +91,10 @@ pub enum GpuError {
     Device(String),
     #[error("render dimensions must be non-zero")]
     InvalidDimensions,
+    #[error(
+        "render texture dimensions {width}x{height} exceed the device limit of {limit} pixels"
+    )]
+    TextureDimensionsTooLarge { width: u32, height: u32, limit: u32 },
     #[error("mesh chunk {chunk} has {indices} indices but no vertices")]
     MissingVertices { chunk: usize, indices: usize },
     #[error("mesh chunk {chunk} contains index {index} outside {vertices} vertices")]
@@ -290,12 +294,17 @@ impl Renderer {
                 .ok_or(GpuError::AdapterNotFound)?
         };
         let info = adapter.get_info();
+        let adapter_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("cangling-map GPU renderer"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    // Keep conservative WebGPU-compatible buffer/binding limits, but
+                    // negotiate the adapter's native texture dimensions. WMS images
+                    // commonly exceed the 2048px downlevel default on HiDPI screens.
+                    required_limits: wgpu::Limits::downlevel_defaults()
+                        .using_resolution(adapter_limits),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
                 None,
@@ -488,6 +497,7 @@ impl Renderer {
             return Err(GpuError::InvalidDimensions);
         }
         let limits = self.device.limits();
+        validate_texture_dimensions(width, height, limits.max_texture_dimension_2d)?;
         let mut stats = PreparedSceneStats::default();
         let mut batches = Vec::with_capacity(chunks.len());
         for (chunk_index, chunk) in chunks.iter().enumerate() {
@@ -598,6 +608,11 @@ impl Renderer {
 
     fn prepare_atlas(&self, atlas: &AtlasOverlay) -> Result<PreparedAtlas, GpuError> {
         validate_atlas(atlas)?;
+        validate_texture_dimensions(
+            atlas.width,
+            atlas.height,
+            self.device.limits().max_texture_dimension_2d,
+        )?;
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -827,11 +842,25 @@ fn validate_chunk(
     Ok(())
 }
 
+fn validate_texture_dimensions(width: u32, height: u32, limit: u32) -> Result<(), GpuError> {
+    if width > limit || height > limit {
+        return Err(GpuError::TextureDimensionsTooLarge {
+            width,
+            height,
+            limit,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use bytemuck::Zeroable;
 
-    use super::{validate_atlas, validate_chunk, AtlasOverlay, ByteLruCache, MeshChunk, Vertex};
+    use super::{
+        validate_atlas, validate_chunk, validate_texture_dimensions, AtlasOverlay, ByteLruCache,
+        GpuError, MeshChunk, Vertex,
+    };
 
     #[test]
     fn rejects_an_out_of_range_index_before_gpu_upload() {
@@ -843,6 +872,19 @@ mod tests {
             indices: vec![1],
         };
         assert!(validate_chunk(0, &chunk, &wgpu::Limits::downlevel_defaults()).is_err());
+    }
+
+    #[test]
+    fn rejects_a_render_target_larger_than_the_negotiated_texture_limit() {
+        assert!(matches!(
+            validate_texture_dimensions(2097, 1200, 2048),
+            Err(GpuError::TextureDimensionsTooLarge {
+                width: 2097,
+                height: 1200,
+                limit: 2048
+            })
+        ));
+        assert!(validate_texture_dimensions(2097, 1200, 32768).is_ok());
     }
 
     #[test]
