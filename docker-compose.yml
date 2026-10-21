@@ -10,6 +10,8 @@ services:
       CATALOG_DATABASE_URL: sqlite:///data/catalog.db?mode=rwc
       WMTS_CACHE_BACKEND: filesystem
       MAP_CACHE_ROOT: /cache
+      MAP_RENDER_BACKEND: cpu
+      MAP_CPU_RENDER_CACHE_PATH: /cache/cpu-render
       RUST_LOG: map_server=info,cangling_gdal_core=info,tower_http=info
     volumes:
       - cangling-map-data:/data

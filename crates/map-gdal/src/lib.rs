@@ -1,5 +1,6 @@
 //! Compatibility adapter between cangling-map domain types and cangling-gdal.
 
+mod cpu_render_cache;
 mod gpu_mesh_cache;
 
 use std::{
@@ -33,25 +34,55 @@ use tracing::warn;
 use gpu_mesh_cache::{GpuMeshArchive, GpuMeshDiskCache};
 
 pub use cangling_gdal_core::DatasetKind;
+pub use cpu_render_cache::CpuRenderCacheStats;
 
 #[derive(Debug, Clone, Default)]
 pub struct GdalVectorRasterizer;
 
+impl GdalVectorRasterizer {
+    pub fn cache_stats() -> CpuRenderCacheStats {
+        cpu_render_cache::global().stats()
+    }
+}
+
 impl VectorRasterizer for GdalVectorRasterizer {
     fn render(&self, request: &VectorRasterRequest) -> Result<RasterizedImage, RasterizeError> {
+        encode_rgba(request, self.render_rgba(request)?)
+    }
+
+    fn render_rgba(&self, request: &VectorRasterRequest) -> Result<RasterizedRgba, RasterizeError> {
         if !request.bbox.is_valid() || request.width == 0 || request.height == 0 {
             return Err(RasterizeError::InvalidRequest(
                 "bbox and image dimensions must be valid".into(),
             ));
         }
-        let gdal_request = to_gdal_request(request)?;
+        let key = cpu_render_key(request);
+        if let Some(cached) = cpu_render_cache::global().load(key, request.width, request.height) {
+            return Ok((*cached).clone());
+        }
+        let mut raw_request = request.clone();
+        raw_request.format = ImageFormat::Png;
+        let gdal_request = to_gdal_request(&raw_request)?;
         let image = GdalEngine
             .render_vector(&gdal_request)
             .map_err(|error| RasterizeError::Backend(error.to_string()))?;
-        Ok(RasterizedImage {
-            bytes: image.bytes,
-            content_type: image.content_type,
-        })
+        let rgba = image::load_from_memory(&image.bytes)
+            .map_err(|error| RasterizeError::Backend(error.to_string()))?
+            .to_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width != request.width || height != request.height {
+            return Err(RasterizeError::Backend(format!(
+                "CPU renderer returned {width}x{height}; expected {}x{}",
+                request.width, request.height
+            )));
+        }
+        let rendered = RasterizedRgba {
+            width,
+            height,
+            pixels: rgba.into_raw(),
+        };
+        cpu_render_cache::global().store(key, rendered.clone());
+        Ok(rendered)
     }
 }
 
@@ -382,7 +413,7 @@ impl GpuVectorRasterizer {
 
 impl VectorRasterizer for GpuVectorRasterizer {
     fn render(&self, request: &VectorRasterRequest) -> Result<RasterizedImage, RasterizeError> {
-        encode_gpu_rgba(request, self.render_raw_rgba(request)?)
+        encode_rgba(request, self.render_raw_rgba(request)?)
     }
 
     fn render_rgba(&self, request: &VectorRasterRequest) -> Result<RasterizedRgba, RasterizeError> {
@@ -470,7 +501,42 @@ fn gpu_scene_identity(request: &VectorRasterRequest) -> u64 {
     let mut hasher = DefaultHasher::new();
     format!("{normalized:?}").hash(&mut hasher);
     hash_source_fingerprint(&request.source.path, &mut hasher);
+    hash_style_assets(request, &mut hasher);
     hasher.finish()
+}
+
+fn cpu_render_key(request: &VectorRasterRequest) -> u64 {
+    let mut normalized = request.clone();
+    normalized.rules.retain(|rule| {
+        rule.minimum_scale_denominator
+            .is_none_or(|minimum| request.scale_denominator >= minimum)
+            && rule
+                .maximum_scale_denominator
+                .is_none_or(|maximum| request.scale_denominator < maximum)
+    });
+    for rule in &mut normalized.rules {
+        rule.minimum_scale_denominator = None;
+        rule.maximum_scale_denominator = None;
+    }
+    normalized.scale_denominator = 0.0;
+    normalized.allow_view_reuse = false;
+    normalized.format = ImageFormat::Png;
+    let mut hasher = DefaultHasher::new();
+    format!("{normalized:?}").hash(&mut hasher);
+    hash_source_fingerprint(&request.source.path, &mut hasher);
+    hash_style_assets(request, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_style_assets(request: &VectorRasterRequest, hasher: &mut impl Hasher) {
+    for path in request
+        .rules
+        .iter()
+        .filter_map(|rule| rule.paint.fill_image.as_ref())
+        .map(|image| image.path.as_path())
+    {
+        hash_file_metadata(path, hasher);
+    }
 }
 
 fn hash_source_fingerprint(path: &std::path::Path, hasher: &mut impl Hasher) {
@@ -796,7 +862,7 @@ fn crop_gpu_rgba(
     })
 }
 
-fn encode_gpu_rgba(
+fn encode_rgba(
     request: &VectorRasterRequest,
     rgba: RasterizedRgba,
 ) -> Result<RasterizedImage, RasterizeError> {
