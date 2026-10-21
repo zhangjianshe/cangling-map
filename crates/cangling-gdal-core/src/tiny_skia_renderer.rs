@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
     io::Cursor,
     path::{Path as FsPath, PathBuf},
     sync::{
@@ -11,7 +12,7 @@ use std::{
 
 use gdal::{
     vector::{Feature, Geometry, LayerAccess, OGRwkbGeometryType::wkbPoint},
-    Dataset,
+    Dataset, Metadata,
 };
 use image::{DynamicImage, ImageFormat as EncoderFormat, RgbImage};
 use tiny_skia::{
@@ -21,7 +22,7 @@ use tiny_skia::{
 
 use crate::{
     GdalError, ImageFormat, PlacedLabel, PreparedPatternOverlay, PreparedPatternVertex,
-    PreparedVectorScene, PreparedVectorVertex, RasterizedLabel, RenderedImage,
+    PreparedVectorScene, PreparedVectorVertex, RasterizedLabel, RasterizedRgba, RenderedImage,
     VectorComparisonOperator, VectorFilter, VectorLiteral, VectorRenderRequest, VectorTextStyle,
 };
 
@@ -29,6 +30,36 @@ pub(crate) fn render_projected(
     dataset: &Dataset,
     request: &VectorRenderRequest,
 ) -> Result<RenderedImage, GdalError> {
+    let pixmap = rasterize_projected(dataset, request)?;
+    let encode_started = Instant::now();
+    let image = encode(pixmap, request.format)?;
+    tracing::debug!(
+        encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0,
+        "vector image encoded"
+    );
+    Ok(image)
+}
+
+pub(crate) fn render_projected_rgba(
+    dataset: &Dataset,
+    request: &VectorRenderRequest,
+) -> Result<RasterizedRgba, GdalError> {
+    let pixmap = rasterize_projected(dataset, request)?;
+    let width = pixmap.width();
+    let height = pixmap.height();
+    let mut pixels = pixmap.data().to_vec();
+    unpremultiply_rgba(&mut pixels);
+    Ok(RasterizedRgba {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn rasterize_projected(
+    dataset: &Dataset,
+    request: &VectorRenderRequest,
+) -> Result<Pixmap, GdalError> {
     let started = Instant::now();
     let render_width = request
         .width
@@ -53,6 +84,7 @@ pub(crate) fn render_projected(
         request.bbox.max_y + buffer_y,
     );
     let mut stats = RenderStats::default();
+    let dataset_id = label_dataset_id(dataset);
     let pixel_transform = PixelTransform::new(request);
     let query_started = Instant::now();
     let single_pass = request.rules.iter().all(|rule| {
@@ -71,6 +103,7 @@ pub(crate) fn render_projected(
             &mut pixmap,
             request,
             &pixel_transform,
+            dataset_id,
             &mut stats,
         )?;
     } else {
@@ -79,9 +112,11 @@ pub(crate) fn render_projected(
             &mut pixmap,
             request,
             &pixel_transform,
+            dataset_id,
             &mut stats,
         )?;
     }
+    let geometry_ms = query_started.elapsed().as_secs_f64() * 1000.0;
     // Label collision decisions need a wider neighborhood than polygon drawing.
     // Query it separately without allocating a larger pixmap, so both sides of
     // a tile seam see the same directly competing labels.
@@ -106,13 +141,16 @@ pub(crate) fn render_projected(
         request.bbox.max_x + label_buffer_x,
         request.bbox.max_y + label_buffer_y,
     );
+    let labels_started = Instant::now();
     render_labels(
         &mut layer,
         &mut pixmap,
         request,
         &pixel_transform,
+        dataset_id,
         &mut stats,
     )?;
+    let labels_ms = labels_started.elapsed().as_secs_f64() * 1000.0;
     let query_and_draw_ms = query_started.elapsed().as_secs_f64() * 1000.0;
     layer.clear_attribute_filter();
     layer.clear_spatial_filter();
@@ -131,8 +169,6 @@ pub(crate) fn render_projected(
             .clone_rect(rect)
             .ok_or_else(|| GdalError::InvalidRequest("failed to crop buffered image".into()))?
     };
-    let encode_started = Instant::now();
-    let image = encode(pixmap, request.format)?;
     tracing::debug!(
         features = stats.features,
         polygons = stats.polygons,
@@ -141,14 +177,19 @@ pub(crate) fn render_projected(
         batched_rules = stats.batched_rules,
         labels = stats.labels,
         rejected_labels = stats.rejected_labels,
+        label_anchor_cache_hits = stats.label_anchor_cache_hits,
+        label_anchor_cache_misses = stats.label_anchor_cache_misses,
+        geometry_cache_hits = stats.geometry_cache_hits,
+        geometry_cache_misses = stats.geometry_cache_misses,
         single_pass,
         buffer_pixels = request.buffer_pixels,
+        geometry_ms,
+        labels_ms,
         query_and_draw_ms,
         draw_ms = draw_elapsed.as_secs_f64() * 1000.0,
-        encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0,
-        "vector tile rendered"
+        "vector pixels rasterized"
     );
-    Ok(image)
+    Ok(pixmap)
 }
 
 fn render_rules_with_ogr_filters(
@@ -156,6 +197,7 @@ fn render_rules_with_ogr_filters(
     pixmap: &mut Pixmap,
     request: &VectorRenderRequest,
     pixel_transform: &PixelTransform,
+    dataset_id: u64,
     stats: &mut RenderStats,
 ) -> Result<(), GdalError> {
     for rule in &request.rules {
@@ -193,11 +235,14 @@ fn render_rules_with_ogr_filters(
         let mut batched_path = batchable.then(PathBuilder::new);
         for feature in layer.features() {
             stats.features += 1;
+            let fid = feature.fid();
             let Some(geometry) = feature.geometry() else {
                 continue;
             };
+            let geometry =
+                cached_geometry(dataset_id, fid, geometry, request.simplify_tolerance, stats)?;
             if let Some(builder) = batched_path.as_mut() {
-                append_geometry(builder, geometry, pixel_transform, stats);
+                append_cached_geometry(builder, &geometry, pixel_transform, stats);
                 continue;
             }
             let fill = resolve_color(&feature, rule.fill, rule.fill_field.as_ref(), fill_index)?;
@@ -207,9 +252,9 @@ fn render_rules_with_ogr_filters(
                 rule.stroke_field.as_ref(),
                 stroke_index,
             )?;
-            draw_geometry(
+            draw_cached_geometry(
                 pixmap,
-                geometry,
+                &geometry,
                 &pixel_transform,
                 fill,
                 fill_image_paint.as_ref(),
@@ -236,11 +281,159 @@ fn render_rules_with_ogr_filters(
     Ok(())
 }
 
+fn simplify_for_drawing(
+    geometry: &Geometry,
+    tolerance: Option<f64>,
+) -> Result<Option<Geometry>, GdalError> {
+    tolerance
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| geometry.simplify(value).map_err(GdalError::from))
+        .transpose()
+}
+
+#[derive(Clone)]
+enum CachedGeometryPart {
+    Polygon(Vec<Vec<(f64, f64)>>),
+    Line(Vec<(f64, f64)>),
+}
+
+struct CachedGeometry {
+    parts: Vec<CachedGeometryPart>,
+    estimated_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GeometryCacheKey {
+    dataset_id: u64,
+    fid: u64,
+    simplify_tolerance: Option<u64>,
+}
+
+#[derive(Default)]
+struct GeometryCacheState {
+    entries: HashMap<GeometryCacheKey, Arc<CachedGeometry>>,
+    estimated_bytes: usize,
+}
+
+fn cached_geometry(
+    dataset_id: u64,
+    fid: Option<u64>,
+    geometry: &Geometry,
+    simplify_tolerance: Option<f64>,
+    stats: &mut RenderStats,
+) -> Result<Arc<CachedGeometry>, GdalError> {
+    let key = fid.map(|fid| GeometryCacheKey {
+        dataset_id,
+        fid,
+        simplify_tolerance: simplify_tolerance.map(f64::to_bits),
+    });
+    let cache = GEOMETRY_CACHE.get_or_init(|| Mutex::new(GeometryCacheState::default()));
+    if let Some(key) = key {
+        if let Some(geometry) = cache
+            .lock()
+            .expect("geometry cache poisoned")
+            .entries
+            .get(&key)
+            .cloned()
+        {
+            stats.geometry_cache_hits += 1;
+            return Ok(geometry);
+        }
+    }
+
+    stats.geometry_cache_misses += 1;
+    let simplified = simplify_for_drawing(geometry, simplify_tolerance)?;
+    let geometry = simplified.as_ref().unwrap_or(geometry);
+    let mut parts = Vec::new();
+    collect_cached_geometry(geometry, &mut parts);
+    let point_count = parts
+        .iter()
+        .map(|part| match part {
+            CachedGeometryPart::Polygon(rings) => rings.iter().map(Vec::len).sum::<usize>(),
+            CachedGeometryPart::Line(points) => points.len(),
+        })
+        .sum::<usize>();
+    let estimated_bytes = point_count * std::mem::size_of::<(f64, f64)>()
+        + parts.len() * std::mem::size_of::<CachedGeometryPart>();
+    let geometry = Arc::new(CachedGeometry {
+        parts,
+        estimated_bytes,
+    });
+
+    if let Some(key) = key {
+        let budget = geometry_cache_budget();
+        if geometry.estimated_bytes <= budget {
+            let mut cache = cache.lock().expect("geometry cache poisoned");
+            if cache
+                .estimated_bytes
+                .saturating_add(geometry.estimated_bytes)
+                > budget
+            {
+                cache.entries.clear();
+                cache.estimated_bytes = 0;
+            }
+            if let Some(previous) = cache.entries.get(&key) {
+                cache.estimated_bytes = cache
+                    .estimated_bytes
+                    .saturating_sub(previous.estimated_bytes);
+            }
+            cache.estimated_bytes = cache
+                .estimated_bytes
+                .saturating_add(geometry.estimated_bytes);
+            cache.entries.insert(key, geometry.clone());
+        }
+    }
+    Ok(geometry)
+}
+
+fn geometry_cache_budget() -> usize {
+    *GEOMETRY_CACHE_BUDGET.get_or_init(|| {
+        std::env::var("MAP_VECTOR_GEOMETRY_CACHE_MB")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(512)
+            .saturating_mul(1024 * 1024)
+    })
+}
+
+fn collect_cached_geometry(geometry: &Geometry, parts: &mut Vec<CachedGeometryPart>) {
+    match geometry.geometry_name().to_ascii_uppercase().as_str() {
+        "POLYGON" => {
+            let rings = (0..geometry.geometry_count())
+                .map(|index| {
+                    let ring = geometry.get_geometry(index);
+                    let mut points = Vec::with_capacity(ring.point_count());
+                    ring.get_points(&mut points);
+                    points
+                        .into_iter()
+                        .map(|(x, y, _)| (x, y))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            parts.push(CachedGeometryPart::Polygon(rings));
+        }
+        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" | "MULTILINESTRING" => {
+            for index in 0..geometry.geometry_count() {
+                collect_cached_geometry(&geometry.get_geometry(index), parts);
+            }
+        }
+        "LINESTRING" => {
+            let mut points = Vec::with_capacity(geometry.point_count());
+            geometry.get_points(&mut points);
+            parts.push(CachedGeometryPart::Line(
+                points.into_iter().map(|(x, y, _)| (x, y)).collect(),
+            ));
+        }
+        _ => {}
+    }
+}
+
 fn render_rules_single_pass(
     layer: &mut impl LayerAccess,
     pixmap: &mut Pixmap,
     request: &VectorRenderRequest,
     pixel_transform: &PixelTransform,
+    dataset_id: u64,
     stats: &mut RenderStats,
 ) -> Result<(), GdalError> {
     let mut field_indices = HashMap::new();
@@ -261,20 +454,40 @@ fn render_rules_single_pass(
         .iter()
         .map(|_| PathBuilder::new())
         .collect::<Vec<_>>();
-    layer.clear_attribute_filter();
+    let combined_filter = request
+        .rules
+        .iter()
+        .map(|rule| rule.where_clause.as_deref())
+        .collect::<Option<Vec<_>>>()
+        .filter(|filters| !filters.is_empty())
+        .map(|filters| {
+            filters
+                .into_iter()
+                .map(|filter| format!("({filter})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        });
+    if let Some(filter) = combined_filter.as_deref() {
+        layer.set_attribute_filter(filter)?;
+    } else {
+        layer.clear_attribute_filter();
+    }
     layer.reset_feature_reading();
     for feature in layer.features() {
         stats.features += 1;
+        let fid = feature.fid();
         let Some(geometry) = feature.geometry() else {
             continue;
         };
+        let geometry =
+            cached_geometry(dataset_id, fid, geometry, request.simplify_tolerance, stats)?;
         for (index, rule) in request.rules.iter().enumerate() {
             if let Some(filter) = &rule.filter {
                 if !filter_matches(&feature, filter, &field_indices)? {
                     continue;
                 }
             }
-            append_geometry(&mut builders[index], geometry, pixel_transform, stats);
+            append_cached_geometry(&mut builders[index], &geometry, pixel_transform, stats);
         }
     }
     for (rule, builder) in request.rules.iter().zip(builders) {
@@ -329,7 +542,7 @@ impl LabelBounds {
 #[derive(Clone)]
 struct LabelCandidate {
     key: (u64, u64, String),
-    path: Path,
+    path: Arc<Path>,
     bounds: LabelBounds,
     fill: [u8; 4],
     halo: [u8; 4],
@@ -344,17 +557,26 @@ fn render_labels(
     pixmap: &mut Pixmap,
     request: &VectorRenderRequest,
     pixel_transform: &PixelTransform,
+    label_dataset_id: u64,
     stats: &mut RenderStats,
 ) -> Result<(), GdalError> {
-    visit_labels(layer, request, pixel_transform, stats, |candidate| {
-        draw_label_candidate(pixmap, candidate, Transform::identity());
-    })
+    visit_labels(
+        layer,
+        request,
+        pixel_transform,
+        label_dataset_id,
+        stats,
+        |candidate| {
+            draw_label_candidate(pixmap, candidate, Transform::identity());
+        },
+    )
 }
 
 fn visit_labels(
     layer: &mut impl LayerAccess,
     request: &VectorRenderRequest,
     pixel_transform: &PixelTransform,
+    label_dataset_id: u64,
     stats: &mut RenderStats,
     mut accept: impl FnMut(&LabelCandidate),
 ) -> Result<(), GdalError> {
@@ -369,6 +591,7 @@ fn visit_labels(
         let field_index = layer.defn().field_index(&text_style.field)?;
         layer.reset_feature_reading();
         for feature in layer.features() {
+            let fid = feature.fid();
             let Some(label) = feature.field_as_string(field_index)? else {
                 continue;
             };
@@ -379,19 +602,22 @@ fn visit_labels(
             let Some(geometry) = feature.geometry() else {
                 continue;
             };
-            let pixel_area = geometry.area().abs()
-                * pixel_transform.scale_x.abs()
-                * pixel_transform.scale_y.abs();
-            if pixel_area < f64::from(text_style.min_area) {
-                stats.rejected_labels += 1;
-                continue;
-            }
-            for (world_x, world_y) in geometry_label_points(
+            let (world_area, label_points) = cached_geometry_label_points(
+                label_dataset_id,
+                fid,
                 geometry,
                 pixel_transform,
                 text_style.repeat_distance,
                 text_style.repeat_count,
-            ) {
+                stats,
+            );
+            let pixel_area =
+                world_area * pixel_transform.scale_x.abs() * pixel_transform.scale_y.abs();
+            if pixel_area < f64::from(text_style.min_area) {
+                stats.rejected_labels += 1;
+                continue;
+            }
+            for &(world_x, world_y) in label_points.iter() {
                 let anchor = pixel_transform.apply(world_x, world_y);
                 if let Some(candidate) = shape_label(label, anchor, (world_x, world_y), text_style)?
                 {
@@ -436,11 +662,12 @@ fn visit_labels(
 }
 
 fn draw_label_candidate(pixmap: &mut Pixmap, candidate: &LabelCandidate, transform: Transform) {
+    let transform = transform.pre_translate(candidate.anchor.0, candidate.anchor.1);
     if candidate.halo_radius > 0.0 {
         let mut halo = paint(candidate.halo);
         halo.anti_alias = true;
         pixmap.stroke_path(
-            &candidate.path,
+            candidate.path.as_ref(),
             &halo,
             &Stroke {
                 width: candidate.halo_radius * 2.0,
@@ -454,7 +681,7 @@ fn draw_label_candidate(pixmap: &mut Pixmap, candidate: &LabelCandidate, transfo
         let mut bold = paint(candidate.fill);
         bold.anti_alias = true;
         pixmap.stroke_path(
-            &candidate.path,
+            candidate.path.as_ref(),
             &bold,
             &Stroke {
                 width: 0.9,
@@ -466,7 +693,13 @@ fn draw_label_candidate(pixmap: &mut Pixmap, candidate: &LabelCandidate, transfo
     }
     let mut fill = paint(candidate.fill);
     fill.anti_alias = true;
-    pixmap.fill_path(&candidate.path, &fill, FillRule::Winding, transform, None);
+    pixmap.fill_path(
+        candidate.path.as_ref(),
+        &fill,
+        FillRule::Winding,
+        transform,
+        None,
+    );
 }
 
 pub(crate) fn layout_projected_labels(
@@ -497,11 +730,13 @@ pub(crate) fn layout_projected_labels(
         request.bbox.max_y + context_y,
     );
     let mut stats = RenderStats::default();
+    let label_dataset_id = label_dataset_id(dataset);
     let mut candidates = Vec::new();
     visit_labels(
         &mut layer,
         request,
         &pixel_transform,
+        label_dataset_id,
         &mut stats,
         |candidate| candidates.push(candidate.clone()),
     )?;
@@ -1046,6 +1281,73 @@ fn geometry_label_points(
     points
 }
 
+fn label_dataset_id(dataset: &Dataset) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    dataset
+        .description()
+        .unwrap_or_else(|_| format!("dataset:{:p}", dataset.c_dataset()))
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cached_geometry_label_points(
+    dataset_id: u64,
+    fid: Option<u64>,
+    geometry: &Geometry,
+    pixel_transform: &PixelTransform,
+    repeat_distance: f32,
+    repeat_count: u32,
+    stats: &mut RenderStats,
+) -> (f64, Arc<Vec<(f64, f64)>>) {
+    let Some(fid) = fid else {
+        return (
+            geometry.area().abs(),
+            Arc::new(geometry_label_points(
+                geometry,
+                pixel_transform,
+                repeat_distance,
+                repeat_count,
+            )),
+        );
+    };
+    let key = LabelAnchorKey {
+        dataset_id,
+        fid,
+        scale_x: pixel_transform.scale_x.abs().to_bits(),
+        scale_y: pixel_transform.scale_y.abs().to_bits(),
+        repeat_distance: repeat_distance.max(0.0).to_bits(),
+        repeat_count,
+    };
+    let cache = LABEL_ANCHOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(entry) = cache
+        .lock()
+        .expect("label anchor cache poisoned")
+        .get(&key)
+        .cloned()
+    {
+        stats.label_anchor_cache_hits += 1;
+        return (entry.world_area, entry.points);
+    }
+
+    stats.label_anchor_cache_misses += 1;
+    let entry = LabelAnchorEntry {
+        world_area: geometry.area().abs(),
+        points: Arc::new(geometry_label_points(
+            geometry,
+            pixel_transform,
+            repeat_distance,
+            repeat_count,
+        )),
+    };
+    let result = (entry.world_area, entry.points.clone());
+    let mut cache = cache.lock().expect("label anchor cache poisoned");
+    if cache.len() >= 262_144 {
+        cache.clear();
+    }
+    cache.insert(key, entry);
+    result
+}
+
 fn polygon_label_point(polygon: &Geometry) -> Option<(f64, f64)> {
     if let Some(centroid) = polygon_centroid(polygon) {
         let mut point = Geometry::empty(wkbPoint).ok()?;
@@ -1144,6 +1446,51 @@ fn shape_label(
     world_anchor: (f64, f64),
     style: &VectorTextStyle,
 ) -> Result<Option<LabelCandidate>, GdalError> {
+    let Some(shaped) = shape_label_template(text, style)? else {
+        return Ok(None);
+    };
+    let padding = style.halo_radius.max(1.0) + 2.0 + style.spacing.max(0.0) / 2.0;
+    Ok(Some(LabelCandidate {
+        key: (
+            world_anchor.0.to_bits(),
+            world_anchor.1.to_bits(),
+            text.to_owned(),
+        ),
+        path: shaped.path.clone(),
+        bounds: LabelBounds {
+            left: anchor.0 + shaped.left - padding,
+            top: anchor.1 + shaped.top - padding,
+            right: anchor.0 + shaped.right + padding,
+            bottom: anchor.1 + shaped.bottom + padding,
+        },
+        fill: style.fill,
+        halo: style.halo,
+        halo_radius: style.halo_radius,
+        anchor,
+        repeat_distance: style.repeat_distance.max(0.0),
+        bold: style.font_bold,
+    }))
+}
+
+fn shape_label_template(
+    text: &str,
+    style: &VectorTextStyle,
+) -> Result<Option<Arc<ShapedLabel>>, GdalError> {
+    let key = LabelShapeKey {
+        text: text.to_owned(),
+        font_family: style.font_family.clone(),
+        font_size: style.font_size.max(1.0).to_bits(),
+        italic: style.font_italic,
+    };
+    let cache = LABEL_SHAPE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(shaped) = cache
+        .lock()
+        .expect("label shape cache poisoned")
+        .get(&key)
+        .cloned()
+    {
+        return Ok(Some(shaped));
+    }
     let font = load_label_font(&style.font_family)?;
     let rb_face = rustybuzz::Face::from_slice(&font, 0)
         .ok_or_else(|| GdalError::InvalidRequest("cannot parse label font".into()))?;
@@ -1164,8 +1511,8 @@ fn shape_label(
         .sum::<f32>();
     let ascender = f32::from(outline_face.ascender()) * scale;
     let descender = f32::from(outline_face.descender()) * scale;
-    let baseline_x = anchor.0 - total_advance / 2.0;
-    let baseline_y = anchor.1 + (ascender + descender) / 2.0;
+    let baseline_x = -total_advance / 2.0;
+    let baseline_y = (ascender + descender) / 2.0;
     let mut builder = PathBuilder::new();
     let mut pen_x = baseline_x;
     let mut pen_y = baseline_y;
@@ -1186,30 +1533,21 @@ fn shape_label(
     let Some(path) = builder.finish() else {
         return Ok(None);
     };
-    let padding = style.halo_radius.max(1.0) + 2.0 + style.spacing.max(0.0) / 2.0;
-    Ok(Some(LabelCandidate {
-        key: (
-            world_anchor.0.to_bits(),
-            world_anchor.1.to_bits(),
-            text.to_owned(),
-        ),
-        path,
-        bounds: LabelBounds {
-            left: baseline_x - padding,
-            top: baseline_y - ascender - padding,
-            right: baseline_x
-                + total_advance
-                + ascender.max(0.0) * if style.font_italic { 0.22 } else { 0.0 }
-                + padding,
-            bottom: baseline_y - descender + padding,
-        },
-        fill: style.fill,
-        halo: style.halo,
-        halo_radius: style.halo_radius,
-        anchor,
-        repeat_distance: style.repeat_distance.max(0.0),
-        bold: style.font_bold,
-    }))
+    let shaped = Arc::new(ShapedLabel {
+        path: Arc::new(path),
+        left: baseline_x,
+        top: baseline_y - ascender,
+        right: baseline_x
+            + total_advance
+            + ascender.max(0.0) * if style.font_italic { 0.22 } else { 0.0 },
+        bottom: baseline_y - descender,
+    });
+    let mut cache = cache.lock().expect("label shape cache poisoned");
+    if cache.len() >= 8192 {
+        cache.clear();
+    }
+    cache.insert(key, shaped.clone());
+    Ok(Some(shaped))
 }
 
 struct GlyphPathBuilder<'a> {
@@ -1345,6 +1683,10 @@ struct RenderStats {
     batched_rules: u64,
     labels: u64,
     rejected_labels: u64,
+    label_anchor_cache_hits: u64,
+    label_anchor_cache_misses: u64,
+    geometry_cache_hits: u64,
+    geometry_cache_misses: u64,
 }
 
 fn field_index<L: LayerAccess>(layer: &L, field: Option<&str>) -> Result<Option<usize>, GdalError> {
@@ -1367,9 +1709,9 @@ fn resolve_color(
     Ok(literal)
 }
 
-fn draw_geometry(
+fn draw_cached_geometry(
     pixmap: &mut Pixmap,
-    geometry: &Geometry,
+    geometry: &CachedGeometry,
     pixel_transform: &PixelTransform,
     fill: Option<[u8; 4]>,
     fill_image_paint: Option<&Paint<'_>>,
@@ -1378,10 +1720,13 @@ fn draw_geometry(
     stroke_dasharray: &[f32],
     stats: &mut RenderStats,
 ) {
-    match geometry.geometry_name().to_ascii_uppercase().as_str() {
-        "POLYGON" => {
-            stats.polygons += 1;
-            if let Some(path) = polygon_path(geometry, pixel_transform, stats) {
+    for part in &geometry.parts {
+        match part {
+            CachedGeometryPart::Polygon(rings) => {
+                stats.polygons += 1;
+                let Some(path) = cached_polygon_path(rings, pixel_transform, stats) else {
+                    continue;
+                };
                 draw_path(
                     pixmap,
                     &path,
@@ -1393,24 +1738,10 @@ fn draw_geometry(
                     FillRule::EvenOdd,
                 );
             }
-        }
-        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => {
-            for index in 0..geometry.geometry_count() {
-                draw_geometry(
-                    pixmap,
-                    &geometry.get_geometry(index),
-                    pixel_transform,
-                    fill,
-                    fill_image_paint,
-                    stroke,
-                    stroke_width,
-                    stroke_dasharray,
-                    stats,
-                );
-            }
-        }
-        "LINESTRING" => {
-            if let Some(path) = line_path(geometry, pixel_transform) {
+            CachedGeometryPart::Line(points) => {
+                let Some(path) = cached_line_path(points, pixel_transform) else {
+                    continue;
+                };
                 draw_path(
                     pixmap,
                     &path,
@@ -1423,22 +1754,6 @@ fn draw_geometry(
                 );
             }
         }
-        "MULTILINESTRING" => {
-            for index in 0..geometry.geometry_count() {
-                draw_geometry(
-                    pixmap,
-                    &geometry.get_geometry(index),
-                    pixel_transform,
-                    None,
-                    None,
-                    stroke,
-                    stroke_width,
-                    stroke_dasharray,
-                    stats,
-                );
-            }
-        }
-        _ => {}
     }
 }
 
@@ -1506,6 +1821,44 @@ static PATTERN_CACHE: OnceLock<Mutex<HashMap<PatternCacheKey, Arc<Pixmap>>>> = O
 static PATTERN_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static PATTERN_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 static FONT_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
+static LABEL_SHAPE_CACHE: OnceLock<Mutex<HashMap<LabelShapeKey, Arc<ShapedLabel>>>> =
+    OnceLock::new();
+static LABEL_ANCHOR_CACHE: OnceLock<Mutex<HashMap<LabelAnchorKey, LabelAnchorEntry>>> =
+    OnceLock::new();
+static GEOMETRY_CACHE: OnceLock<Mutex<GeometryCacheState>> = OnceLock::new();
+static GEOMETRY_CACHE_BUDGET: OnceLock<usize> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LabelAnchorKey {
+    dataset_id: u64,
+    fid: u64,
+    scale_x: u64,
+    scale_y: u64,
+    repeat_distance: u32,
+    repeat_count: u32,
+}
+
+#[derive(Clone)]
+struct LabelAnchorEntry {
+    world_area: f64,
+    points: Arc<Vec<(f64, f64)>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LabelShapeKey {
+    text: String,
+    font_family: String,
+    font_size: u32,
+    italic: bool,
+}
+
+struct ShapedLabel {
+    path: Arc<Path>,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
 
 fn load_label_font(_family: &str) -> Result<Arc<Vec<u8>>, GdalError> {
     let configured = std::env::var_os("MAP_FONT_PATH").map(PathBuf::from);
@@ -1651,86 +2004,68 @@ pub(crate) fn pattern_cache_stats() -> (usize, usize, u64, u64) {
     )
 }
 
-fn polygon_path(
-    polygon: &Geometry,
+fn cached_polygon_path(
+    rings: &[Vec<(f64, f64)>],
     pixel_transform: &PixelTransform,
     stats: &mut RenderStats,
 ) -> Option<Path> {
     let mut builder = PathBuilder::new();
-    append_polygon(&mut builder, polygon, pixel_transform, stats);
+    append_cached_polygon(&mut builder, rings, pixel_transform, stats);
     builder.finish()
 }
 
-fn line_path(line: &Geometry, pixel_transform: &PixelTransform) -> Option<Path> {
+fn cached_line_path(points: &[(f64, f64)], pixel_transform: &PixelTransform) -> Option<Path> {
     let mut builder = PathBuilder::new();
-    append_line(&mut builder, line, pixel_transform);
+    append_cached_line(&mut builder, points, pixel_transform);
     builder.finish()
 }
 
-fn append_geometry(
+fn append_cached_geometry(
     builder: &mut PathBuilder,
-    geometry: &Geometry,
+    geometry: &CachedGeometry,
     pixel_transform: &PixelTransform,
     stats: &mut RenderStats,
 ) {
-    match geometry.geometry_name().to_ascii_uppercase().as_str() {
-        "POLYGON" => {
-            stats.polygons += 1;
-            append_polygon(builder, geometry, pixel_transform, stats);
-        }
-        "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => {
-            for index in 0..geometry.geometry_count() {
-                append_geometry(
-                    builder,
-                    &geometry.get_geometry(index),
-                    pixel_transform,
-                    stats,
-                );
+    for part in &geometry.parts {
+        match part {
+            CachedGeometryPart::Polygon(rings) => {
+                stats.polygons += 1;
+                append_cached_polygon(builder, rings, pixel_transform, stats);
+            }
+            CachedGeometryPart::Line(points) => {
+                append_cached_line(builder, points, pixel_transform);
             }
         }
-        "LINESTRING" => append_line(builder, geometry, pixel_transform),
-        "MULTILINESTRING" => {
-            for index in 0..geometry.geometry_count() {
-                append_geometry(
-                    builder,
-                    &geometry.get_geometry(index),
-                    pixel_transform,
-                    stats,
-                );
-            }
-        }
-        _ => {}
     }
 }
 
-fn append_line(builder: &mut PathBuilder, line: &Geometry, pixel_transform: &PixelTransform) {
-    if line.point_count() < 2 {
+fn append_cached_line(
+    builder: &mut PathBuilder,
+    points: &[(f64, f64)],
+    pixel_transform: &PixelTransform,
+) {
+    if points.len() < 2 {
         return;
     }
-    let (x, y, _) = line.get_point(0);
-    let (x, y) = pixel_transform.apply(x, y);
+    let (x, y) = pixel_transform.apply(points[0].0, points[0].1);
     builder.move_to(x, y);
-    for point in 1..line.point_count() {
-        let (x, y, _) = line.get_point(point as i32);
+    for &(x, y) in &points[1..] {
         let (x, y) = pixel_transform.apply(x, y);
         builder.line_to(x, y);
     }
 }
 
-fn append_polygon(
+fn append_cached_polygon(
     builder: &mut PathBuilder,
-    polygon: &Geometry,
+    rings: &[Vec<(f64, f64)>],
     pixel_transform: &PixelTransform,
     stats: &mut RenderStats,
 ) {
-    for index in 0..polygon.geometry_count() {
-        let ring = polygon.get_geometry(index);
+    for (index, ring) in rings.iter().enumerate() {
         stats.rings += 1;
-        let mut points = (0..ring.point_count())
-            .map(|point| {
-                let (x, y, _) = ring.get_point(point as i32);
-                pixel_transform.apply(x, y)
-            })
+        let mut points = ring
+            .iter()
+            .map(|&(x, y)| pixel_transform.apply(x, y))
             .collect::<Vec<_>>();
         points.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
         if points.len() > 1 && points.first() == points.last() {
@@ -1851,9 +2186,77 @@ fn encode(pixmap: Pixmap, format: ImageFormat) -> Result<RenderedImage, GdalErro
     })
 }
 
+fn unpremultiply_rgba(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
+            pixel[..3].fill(0);
+            continue;
+        }
+        if alpha == 255 {
+            continue;
+        }
+        for channel in &mut pixel[..3] {
+            *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_text_style() -> VectorTextStyle {
+        VectorTextStyle {
+            field: "name".into(),
+            font_family: "sans-serif".into(),
+            font_size: 18.0,
+            font_italic: false,
+            font_bold: true,
+            fill: [20, 40, 30, 255],
+            halo: [255, 255, 255, 255],
+            halo_radius: 1.5,
+            spacing: 4.0,
+            min_area: 0.0,
+            repeat_distance: 0.0,
+            repeat_count: 1,
+        }
+    }
+
+    #[test]
+    fn reuses_shaped_label_path_across_anchors() {
+        let style = test_text_style();
+        let first = shape_label("Test", (10.0, 20.0), (1.0, 2.0), &style)
+            .expect("shape first label")
+            .expect("first label path");
+        let second = shape_label("Test", (110.0, 220.0), (3.0, 4.0), &style)
+            .expect("shape second label")
+            .expect("second label path");
+
+        assert!(Arc::ptr_eq(&first.path, &second.path));
+        assert!((second.bounds.left - first.bounds.left - 100.0).abs() < 1e-4);
+        assert!((second.bounds.right - first.bounds.right - 100.0).abs() < 1e-4);
+        assert!((second.bounds.top - first.bounds.top - 200.0).abs() < 1e-4);
+        assert!((second.bounds.bottom - first.bounds.bottom - 200.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reuses_simplified_world_geometry_by_dataset_and_feature() {
+        let geometry = Geometry::from_wkt("POLYGON ((0 0, 20 0, 20 20, 10 20.1, 0 20, 0 0))")
+            .expect("test polygon");
+        let mut first_stats = RenderStats::default();
+        let first = cached_geometry(0xfeed, Some(7), &geometry, Some(0.5), &mut first_stats)
+            .expect("first cached geometry");
+        let mut second_stats = RenderStats::default();
+        let second = cached_geometry(0xfeed, Some(7), &geometry, Some(0.5), &mut second_stats)
+            .expect("second cached geometry");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first_stats.geometry_cache_misses, 1);
+        assert_eq!(second_stats.geometry_cache_hits, 1);
+        assert!(!first.parts.is_empty());
+    }
+
     #[test]
     fn parses_field_colors() {
         assert_eq!(parse_css_color("#58a76f", 0.5), Some([88, 167, 111, 128]));
@@ -1870,6 +2273,15 @@ mod tests {
             signed_area_twice(&[(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)]),
             4.0
         );
+    }
+
+    #[test]
+    fn converts_tiny_skia_pixels_to_straight_alpha() {
+        let mut pixels = vec![100, 50, 25, 128, 10, 20, 30, 255, 9, 8, 7, 0];
+        unpremultiply_rgba(&mut pixels);
+        assert_eq!(&pixels[0..4], &[199, 100, 50, 128]);
+        assert_eq!(&pixels[4..8], &[10, 20, 30, 255]);
+        assert_eq!(&pixels[8..12], &[0, 0, 0, 0]);
     }
 
     #[test]

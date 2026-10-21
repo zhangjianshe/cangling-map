@@ -1002,7 +1002,6 @@ struct MetricsSnapshot {
     active_tile_requests: usize,
     projection_cache_budget_mb: u64,
     vector_render_backend: String,
-    cpu_renderer: CpuRendererStatus,
     gpu_renderer: Option<GpuRendererStatus>,
     cache_backend: CacheBackendStatus,
     layers: Vec<LayerMetricsSnapshot>,
@@ -1010,18 +1009,6 @@ struct MetricsSnapshot {
     recent_wms_requests: Vec<WmsRequestSnapshot>,
     series: Vec<MetricSeriesPoint>,
     render_cache: cangling_gdal_core::RenderCacheStats,
-}
-
-#[derive(Serialize)]
-struct CpuRendererStatus {
-    render_cache_enabled: bool,
-    memory_entries: usize,
-    memory_resident_bytes: usize,
-    memory_hits: u64,
-    disk_hits: u64,
-    misses: u64,
-    writes: u64,
-    errors: u64,
 }
 
 #[derive(Serialize)]
@@ -1121,19 +1108,6 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
             .and_then(|value| value.parse().ok())
             .unwrap_or(2048),
         vector_render_backend: state.vector_render_backend.clone(),
-        cpu_renderer: {
-            let cache = map_gdal::GdalVectorRasterizer::cache_stats();
-            CpuRendererStatus {
-                render_cache_enabled: cache.enabled,
-                memory_entries: cache.memory_entries,
-                memory_resident_bytes: cache.memory_resident_bytes,
-                memory_hits: cache.memory_hits,
-                disk_hits: cache.disk_hits,
-                misses: cache.misses,
-                writes: cache.writes,
-                errors: cache.errors,
-            }
-        },
         gpu_renderer: state.gpu_backend.as_ref().map(|gpu| {
             let fallback = state
                 .gpu_rasterizer

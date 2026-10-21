@@ -61,14 +61,11 @@ curl 'http://127.0.0.1:3000/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.
 | 本地缓存根目录 | `/cache` | `MAP_CACHE_ROOT` |
 | WMTS 瓦片缓存 | `/cache/wmts` | `WMTS_CACHE_PATH` |
 | 矢量预投影缓存 | `/cache/vector-projection` | `VECTOR_PROJECTION_CACHE_PATH` |
-| CPU 绘制结果缓存 | `/cache/cpu-render` | `MAP_CPU_RENDER_CACHE_PATH` |
 | GPU 就绪网格缓存 | `/cache/gpu-mesh` | `MAP_GPU_MESH_CACHE_PATH` |
 
-`WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH`、`MAP_CPU_RENDER_CACHE_PATH` 和
-`MAP_GPU_MESH_CACHE_PATH` 是可选的
+`WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH` 和 `MAP_GPU_MESH_CACHE_PATH` 是可选的
 细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
-`MAP_CACHE_ROOT/vector-projection`、`MAP_CACHE_ROOT/cpu-render` 和
-`MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
+`MAP_CACHE_ROOT/vector-projection` 和 `MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
 `MAP_CACHE_ROOT` 默认为当前目录下的 `cache`。
 
 例如将缓存放到另一块磁盘：
@@ -84,24 +81,16 @@ VECTOR_PROJECTION_CACHE_MB=2048
 VECTOR_PROJECTION_CACHE_SIZE=32
 VECTOR_PROJECTION_SCOPE=local
 VECTOR_PROJECTION_METATILE_FACTOR=4
+MAP_VECTOR_GEOMETRY_CACHE_MB=512
 ```
 
 将 `VECTOR_PROJECTION_CACHE_PATH` 设置为空字符串可关闭持久化预投影缓存。
 
-## CPU 绘制缓存
-
-CPU 渲染器会把已经完成数据查询、投影、几何绘制和标签布局的成员图层保存为原始 RGBA。
-图层组命中时直接读取 RGBA 进行合成，不再重复执行 tiny-skia 绘制，也不需要成员 PNG 的
-编解码。缓存键包含数据及 Shapefile 伴随文件指纹、样式图片指纹、目标 CRS、范围、输出尺寸、
-缓冲和当前生效样式规则；文件损坏、版本不符或尺寸不匹配时会自动删除并重建。
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `MAP_CPU_RENDER_CACHE_PATH` | `${MAP_CACHE_ROOT}/cpu-render` | CPU RGBA 绘制缓存目录；空字符串表示关闭持久化缓存 |
-| `MAP_CPU_RENDER_CACHE_MB` | `512` | 进程内 CPU RGBA LRU 缓存预算 |
-| `MAP_CPU_RENDER_CACHE_MAX_ENTRY_MB` | `512` | 单个持久化 RGBA 文件的最大尺寸 |
-
-上线前可使用与客户端一致的范围、输出尺寸和像素比预热 CPU 或 GPU 后端：
+CPU 渲染器只持久化可跨范围、尺寸和样式复用的预投影矢量数据，不保存最终 RGBA 或 PNG。
+进程内还会在 `MAP_VECTOR_GEOMETRY_CACHE_MB` 预算内复用按缩放精度简化后的世界坐标几何、
+标签锚点和字形轮廓；这些都是下一次实时绘制的矢量中间结果，不是最终图片缓存。
+最终瓦片缓存由 cangling-tile 负责。上线前可使用与客户端一致的范围、输出尺寸和像素比预热
+矢量投影或 GPU 后端：
 
 ```bash
 MAP_RENDER_BACKEND=cpu cargo run --release -p map-server
@@ -109,7 +98,7 @@ MAP_SERVER_URL=http://127.0.0.1:3000 \
   ./tools/prewarm-render-cache.sh deploy/render-prewarm.example.tsv
 ```
 
-`/api/metrics` 的 `cpu_renderer` 节点返回内存命中、磁盘命中、未命中、写入和损坏恢复次数。
+`/api/metrics` 的 `render_cache` 节点返回源数据集、预投影矢量和图片纹理的缓存状态。
 
 ## GPU 矢量渲染（实验性生产模式）
 

@@ -208,8 +208,6 @@ spec:
               value: /cache
             - name: MAP_RENDER_BACKEND
               value: cpu
-            - name: MAP_CPU_RENDER_CACHE_PATH
-              value: /cache/cpu-render
             - name: RUST_LOG
               value: map_server=info,cangling_gdal_core=info,tower_http=info
           ports:

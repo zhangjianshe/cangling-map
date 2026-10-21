@@ -310,6 +310,16 @@ pub struct RenderedImage {
     pub content_type: &'static str,
 }
 
+/// Straight-alpha RGBA pixels produced by vector rendering before image
+/// encoding. Keeping this boundary in the core avoids encoding every member
+/// of a layer group only to decode it again for composition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterizedRgba {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RenderCacheStats {
     pub source_entries: usize,
@@ -453,24 +463,16 @@ impl GdalEngine {
     }
 
     pub fn render_vector(&self, request: &VectorRenderRequest) -> Result<RenderedImage, GdalError> {
-        request.bbox.validate()?;
-        if request.width == 0 || request.height == 0 {
-            return Err(GdalError::InvalidRequest(
-                "image width and height must be greater than zero".into(),
-            ));
-        }
-        if request.target_crs.trim().is_empty() {
-            return Err(GdalError::InvalidRequest("target CRS is required".into()));
-        }
-        if request
-            .simplify_tolerance
-            .is_some_and(|value| !value.is_finite() || value <= 0.0)
-        {
-            return Err(GdalError::InvalidRequest(
-                "simplification tolerance must be finite and greater than zero".into(),
-            ));
-        }
+        validate_vector_request(request)?;
         ffi::render_vector(request)
+    }
+
+    pub fn render_vector_rgba(
+        &self,
+        request: &VectorRenderRequest,
+    ) -> Result<RasterizedRgba, GdalError> {
+        validate_vector_request(request)?;
+        ffi::with_projected_vector(request, tiny_skia_renderer::render_projected_rgba)
     }
 
     pub fn layout_vector_labels(
@@ -611,6 +613,27 @@ impl GdalEngine {
             values_truncated,
         })
     }
+}
+
+fn validate_vector_request(request: &VectorRenderRequest) -> Result<(), GdalError> {
+    request.bbox.validate()?;
+    if request.width == 0 || request.height == 0 {
+        return Err(GdalError::InvalidRequest(
+            "image width and height must be greater than zero".into(),
+        ));
+    }
+    if request.target_crs.trim().is_empty() {
+        return Err(GdalError::InvalidRequest("target CRS is required".into()));
+    }
+    if request
+        .simplify_tolerance
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(GdalError::InvalidRequest(
+            "simplification tolerance must be finite and greater than zero".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn update_numeric(

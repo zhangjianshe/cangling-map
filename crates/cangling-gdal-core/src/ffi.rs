@@ -136,8 +136,9 @@ pub(crate) fn with_projected_vector<T>(
     let source_key = source_cache_key(request)?;
     // Persistent entries are complete target-CRS datasets. Keeping request
     // bounds and pixel-derived simplification out of their identity gives one
-    // reusable, spatially indexed file per source/CRS and avoids persisting an
-    // accidentally empty metatile when GDAL cannot transform `-spat_srs`.
+    // reusable, spatially indexed file per source/CRS. Geometry simplification
+    // happens after the indexed target-CRS query, where its tolerance has the
+    // correct unit and cannot corrupt geographic source coordinates.
     let persistent = persistent_projection_enabled();
     let projection_bounds = (!persistent)
         .then(|| projection_cache_bounds(request))
@@ -356,7 +357,7 @@ fn persistent_projection_enabled() -> bool {
 
 fn projection_cache_fingerprint(key: &ProjectionCacheKey) -> String {
     let mut hash = Sha256::new();
-    hash.update(b"cangling-gdal-projection-v2\0");
+    hash.update(b"cangling-gdal-projection-v3\0");
     hash_field(&mut hash, key.source.path.to_string_lossy().as_bytes());
     hash_optional_field(&mut hash, key.source.layer.as_deref());
     hash_optional_field(&mut hash, key.source.encoding.as_deref());
