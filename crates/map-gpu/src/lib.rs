@@ -1,6 +1,10 @@
 //! Reusable off-screen GPU raster backend for prepared vector meshes.
 
-use std::{collections::HashMap, hash::Hash, sync::mpsc};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{mpsc, Mutex},
+};
 
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -30,6 +34,22 @@ pub struct AtlasVertex {
     pub _padding: [f32; 2],
     /// Multiplied with the sampled RGBA value.
     pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct ViewTransform {
+    /// Converts cached scene clip coordinates into the current viewport clip
+    /// coordinates: `position.xy * scale + offset`.
+    pub scale_offset: [f32; 4],
+}
+
+impl Default for ViewTransform {
+    fn default() -> Self {
+        Self {
+            scale_offset: [1.0, 1.0, 0.0, 0.0],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,23 +152,74 @@ pub struct Renderer {
     atlas_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     atlas_bind_group_layout: wgpu::BindGroupLayout,
+    view_bind_group_layout: wgpu::BindGroupLayout,
     adapter: AdapterInfo,
+    targets: Mutex<RenderTargetPool>,
 }
 
 pub struct PreparedScene {
     batches: Vec<DrawBatch>,
+    width: u32,
+    height: u32,
+    stats: PreparedSceneStats,
+    atlases: Vec<PreparedAtlas>,
+    clear_color: wgpu::Color,
+}
+
+struct RenderTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     _multisample_texture: wgpu::Texture,
     multisample_view: wgpu::TextureView,
     output: wgpu::Buffer,
+    view_transform: wgpu::Buffer,
+    view_bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
     padded_bytes_per_row: u32,
-    stats: PreparedSceneStats,
-    atlases: Vec<PreparedAtlas>,
-    clear_color: wgpu::Color,
+    estimated_gpu_bytes: usize,
+}
+
+struct RenderTargetPool {
+    targets: Vec<RenderTarget>,
+    resident_bytes: usize,
+    budget_bytes: usize,
+}
+
+impl RenderTargetPool {
+    fn new(budget_bytes: usize) -> Self {
+        Self {
+            targets: Vec::new(),
+            resident_bytes: 0,
+            budget_bytes,
+        }
+    }
+
+    fn take(&mut self, width: u32, height: u32) -> Option<RenderTarget> {
+        let index = self
+            .targets
+            .iter()
+            .rposition(|target| target.width == width && target.height == height)?;
+        let target = self.targets.swap_remove(index);
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_sub(target.estimated_gpu_bytes);
+        Some(target)
+    }
+
+    fn put(&mut self, target: RenderTarget) {
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_add(target.estimated_gpu_bytes);
+        self.targets.push(target);
+        while self.resident_bytes > self.budget_bytes && !self.targets.is_empty() {
+            let target = self.targets.remove(0);
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(target.estimated_gpu_bytes);
+        }
+    }
 }
 
 /// Byte-budgeted LRU for prepared spatial chunks, label atlases and image
@@ -193,6 +264,18 @@ impl<K: Eq + Hash, V> ByteLruCache<K, V> {
         let entry = self.entries.get_mut(key)?;
         entry.last_used = self.clock;
         Some(&entry.value)
+    }
+
+    pub fn find(&mut self, mut predicate: impl FnMut(&K, &V) -> bool) -> Option<&V>
+    where
+        K: Clone,
+    {
+        let key = self
+            .entries
+            .iter()
+            .find(|(key, entry)| predicate(key, &entry.value))
+            .map(|(key, _)| key.clone())?;
+        self.get(&key)
     }
 
     /// Inserts a value and returns entries evicted to honor the byte budget.
@@ -332,9 +415,23 @@ impl Renderer {
                 count: None,
             }],
         });
+        let view_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("cangling-map view transform layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cangling-map mesh pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[&bind_group_layout, &view_bind_group_layout],
             push_constant_ranges: &[],
         });
         let atlas_bind_group_layout =
@@ -372,7 +469,7 @@ impl Renderer {
         let atlas_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("cangling-map atlas pipeline layout"),
-                bind_group_layouts: &[&atlas_bind_group_layout],
+                bind_group_layouts: &[&atlas_bind_group_layout, &view_bind_group_layout],
                 push_constant_ranges: &[],
             });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -432,6 +529,11 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let target_pool_mb = std::env::var("MAP_GPU_TARGET_POOL_MB")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(512);
         Ok(Self {
             device,
             queue,
@@ -439,11 +541,15 @@ impl Renderer {
             atlas_pipeline,
             bind_group_layout,
             atlas_bind_group_layout,
+            view_bind_group_layout,
             adapter: AdapterInfo {
                 name: info.name,
                 backend: format!("{:?}", info.backend),
                 device_type: format!("{:?}", info.device_type),
             },
+            targets: Mutex::new(RenderTargetPool::new(
+                target_pool_mb.saturating_mul(1024 * 1024),
+            )),
         })
     }
 
@@ -537,46 +643,6 @@ impl Renderer {
                 index_count: chunk.indices.len() as u32,
             });
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cangling-map offscreen target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&Default::default());
-        let multisample_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cangling-map multisample target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: SAMPLE_COUNT,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let multisample_view = multisample_texture.create_view(&Default::default());
-        let unpadded_bytes_per_row = width * 4;
-        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
-        let output = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cangling-map readback"),
-            size: u64::from(padded_bytes_per_row) * u64::from(height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        stats.estimated_gpu_bytes +=
-            (u64::from(width) * u64::from(height) * 4 * (2 + u64::from(SAMPLE_COUNT))) as usize;
         let atlases = atlases
             .iter()
             .map(|atlas| self.prepare_atlas(atlas))
@@ -586,15 +652,8 @@ impl Renderer {
         }
         Ok(PreparedScene {
             batches,
-            texture,
-            view,
-            _multisample_texture: multisample_texture,
-            multisample_view,
-            output,
             width,
             height,
-            unpadded_bytes_per_row,
-            padded_bytes_per_row,
             stats,
             atlases,
             clear_color: wgpu::Color {
@@ -700,13 +759,127 @@ impl Renderer {
     }
 
     pub fn render_rgba(&self, scene: &PreparedScene) -> Result<Vec<u8>, GpuError> {
+        self.render_rgba_with_view(scene, scene.width, scene.height, ViewTransform::default())
+    }
+
+    pub fn render_rgba_with_view(
+        &self,
+        scene: &PreparedScene,
+        width: u32,
+        height: u32,
+        transform: ViewTransform,
+    ) -> Result<Vec<u8>, GpuError> {
+        let mut target = self.take_render_target(width, height)?;
+        self.queue
+            .write_buffer(&target.view_transform, 0, bytemuck::bytes_of(&transform));
+        let result = self.render_rgba_to_target(scene, &mut target);
+        if result.is_ok() {
+            self.targets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .put(target);
+        }
+        result
+    }
+
+    fn take_render_target(&self, width: u32, height: u32) -> Result<RenderTarget, GpuError> {
+        if let Some(target) = self
+            .targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(width, height)
+        {
+            return Ok(target);
+        }
+        self.create_render_target(width, height)
+    }
+
+    fn create_render_target(&self, width: u32, height: u32) -> Result<RenderTarget, GpuError> {
+        validate_texture_dimensions(width, height, self.device.limits().max_texture_dimension_2d)?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cangling-map offscreen target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let multisample_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cangling-map multisample target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let multisample_view = multisample_texture.create_view(&Default::default());
+        let unpadded_bytes_per_row = width * 4;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(256) * 256;
+        let output = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cangling-map readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view_transform = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cangling-map view transform"),
+                contents: bytemuck::bytes_of(&ViewTransform::default()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let view_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cangling-map view bind group"),
+            layout: &self.view_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: view_transform.as_entire_binding(),
+            }],
+        });
+        Ok(RenderTarget {
+            texture,
+            view,
+            _multisample_texture: multisample_texture,
+            multisample_view,
+            output,
+            view_transform,
+            view_bind_group,
+            width,
+            height,
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+            estimated_gpu_bytes: (u64::from(width)
+                * u64::from(height)
+                * 4
+                * (2 + u64::from(SAMPLE_COUNT))) as usize,
+        })
+    }
+
+    fn render_rgba_to_target(
+        &self,
+        scene: &PreparedScene,
+        target: &mut RenderTarget,
+    ) -> Result<Vec<u8>, GpuError> {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cangling-map vector pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &scene.multisample_view,
-                    resolve_target: Some(&scene.view),
+                    view: &target.multisample_view,
+                    resolve_target: Some(&target.view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(scene.clear_color),
                         store: wgpu::StoreOp::Discard,
@@ -717,12 +890,14 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.atlas_pipeline);
+            pass.set_bind_group(1, &target.view_bind_group, &[]);
             for atlas in scene.atlases.iter().filter(|atlas| atlas.underlay) {
                 pass.set_bind_group(0, &atlas.bind_group, &[]);
                 pass.set_index_buffer(atlas.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..atlas.index_count, 0, 0..1);
             }
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(1, &target.view_bind_group, &[]);
             for batch in &scene.batches {
                 pass.set_bind_group(0, &batch.bind_group, &[]);
                 pass.set_index_buffer(batch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -736,19 +911,19 @@ impl Renderer {
             }
         }
         encoder.copy_texture_to_buffer(
-            scene.texture.as_image_copy(),
+            target.texture.as_image_copy(),
             wgpu::ImageCopyBuffer {
-                buffer: &scene.output,
+                buffer: &target.output,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(scene.padded_bytes_per_row),
-                    rows_per_image: Some(scene.height),
+                    bytes_per_row: Some(target.padded_bytes_per_row),
+                    rows_per_image: Some(target.height),
                 },
             },
-            scene.texture.size(),
+            target.texture.size(),
         );
         self.queue.submit(Some(encoder.finish()));
-        let slice = scene.output.slice(..);
+        let slice = target.output.slice(..);
         let (sender, receiver) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
@@ -759,12 +934,12 @@ impl Renderer {
             .map_err(|error| GpuError::Readback(error.to_string()))?
             .map_err(|error| GpuError::Readback(error.to_string()))?;
         let mapped = slice.get_mapped_range();
-        let mut pixels = Vec::with_capacity((scene.width * scene.height * 4) as usize);
-        for row in mapped.chunks_exact(scene.padded_bytes_per_row as usize) {
-            pixels.extend_from_slice(&row[..scene.unpadded_bytes_per_row as usize]);
+        let mut pixels = Vec::with_capacity((target.width * target.height * 4) as usize);
+        for row in mapped.chunks_exact(target.padded_bytes_per_row as usize) {
+            pixels.extend_from_slice(&row[..target.unpadded_bytes_per_row as usize]);
         }
         drop(mapped);
-        scene.output.unmap();
+        target.output.unmap();
         Ok(pixels)
     }
 }

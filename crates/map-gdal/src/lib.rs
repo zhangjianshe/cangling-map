@@ -6,7 +6,7 @@ use std::{
     io::Cursor,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 
@@ -18,10 +18,10 @@ use cangling_gdal_core::{
 use map_core::BoundingBox;
 use map_gpu::{
     AtlasOverlay, AtlasVertex, ByteLruCache, MeshChunk, PreparedScene, Renderer, RendererOptions,
-    Vertex,
+    Vertex, ViewTransform,
 };
 use map_render::{
-    ImageFormat, RasterizeError, RasterizedImage, VectorColor, VectorRasterRequest,
+    ImageFormat, RasterizeError, RasterizedImage, RasterizedRgba, VectorColor, VectorRasterRequest,
     VectorRasterizer,
 };
 use map_style::{ComparisonOperator, Filter, Literal};
@@ -140,9 +140,18 @@ fn to_gdal_request(request: &VectorRasterRequest) -> Result<VectorRenderRequest,
 
 pub struct GpuVectorRasterizer {
     renderer: Renderer,
-    scenes: Mutex<ByteLruCache<u64, PreparedScene>>,
+    scenes: Mutex<ByteLruCache<u64, CachedGpuScene>>,
     scene_hits: AtomicU64,
     scene_misses: AtomicU64,
+}
+
+#[derive(Clone)]
+struct CachedGpuScene {
+    identity: u64,
+    coverage: BoundingBox,
+    resolution_x: f64,
+    resolution_y: f64,
+    scene: Arc<PreparedScene>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -188,32 +197,52 @@ impl GpuVectorRasterizer {
             misses: self.scene_misses.load(Ordering::Relaxed),
         }
     }
-}
 
-impl VectorRasterizer for GpuVectorRasterizer {
-    fn render(&self, request: &VectorRasterRequest) -> Result<RasterizedImage, RasterizeError> {
+    fn render_raw_rgba(
+        &self,
+        request: &VectorRasterRequest,
+    ) -> Result<RasterizedRgba, RasterizeError> {
         if !request.bbox.is_valid() || request.width == 0 || request.height == 0 {
             return Err(RasterizeError::InvalidRequest(
                 "bbox and image dimensions must be valid".into(),
             ));
         }
-        let scene_key = gpu_scene_key(request);
-        {
+        let identity = gpu_scene_identity(request);
+        let resolution_x = (request.bbox.max_x - request.bbox.min_x) / f64::from(request.width);
+        let resolution_y = (request.bbox.max_y - request.bbox.min_y) / f64::from(request.height);
+        let requested_coverage = rendered_bbox(request);
+        let cached = {
             let mut scenes = self
                 .scenes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(scene) = scenes.get(&scene_key) {
-                self.scene_hits.fetch_add(1, Ordering::Relaxed);
-                let rgba = self
-                    .renderer
-                    .render_rgba(scene)
-                    .map_err(|error| RasterizeError::Unavailable(error.to_string()))?;
-                return encode_gpu_output(request, scene_crop(request), rgba);
-            }
+            scenes
+                .find(|_, cached| {
+                    cached.identity == identity
+                        && resolution_matches(cached.resolution_x, resolution_x)
+                        && resolution_matches(cached.resolution_y, resolution_y)
+                        && bbox_contains(cached.coverage, requested_coverage)
+                })
+                .cloned()
+        };
+        if let Some(cached) = cached {
+            self.scene_hits.fetch_add(1, Ordering::Relaxed);
+            let (target_width, target_height) = gpu_target_dimensions(request);
+            let rgba = self
+                .renderer
+                .render_rgba_with_view(
+                    &cached.scene,
+                    target_width,
+                    target_height,
+                    scene_view_transform(cached.coverage, requested_coverage),
+                )
+                .map_err(|error| RasterizeError::Unavailable(error.to_string()))?;
+            return crop_gpu_rgba(request, scene_crop(request), rgba);
         }
         self.scene_misses.fetch_add(1, Ordering::Relaxed);
-        let gdal_request = to_gdal_request(request)?;
+        let prepared_request = gpu_coverage_request(request);
+        let coverage = rendered_bbox(&prepared_request);
+        let gdal_request = to_gdal_request(&prepared_request)?;
         let prepared = GdalEngine
             .prepare_vector_scene(&gdal_request)
             .map_err(|error| {
@@ -231,30 +260,54 @@ impl VectorRasterizer for GpuVectorRasterizer {
             prepared.height,
             &prepared.labels,
         )?);
-        let scene = self
-            .renderer
-            .prepare_with_background_and_atlases(
-                prepared.width,
-                prepared.height,
-                &chunks,
-                prepared.background,
-                &atlases,
-            )
-            .map_err(classify_gpu_prepare_error)?;
+        let scene = Arc::new(
+            self.renderer
+                .prepare_with_background_and_atlases(
+                    prepared.width,
+                    prepared.height,
+                    &chunks,
+                    prepared.background,
+                    &atlases,
+                )
+                .map_err(classify_gpu_prepare_error)?,
+        );
         let scene_bytes = scene.stats().estimated_gpu_bytes;
-        let mut scenes = self
-            .scenes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _evicted = scenes.insert(scene_key, scene, scene_bytes);
-        let scene = scenes
-            .get(&scene_key)
-            .expect("the newly inserted GPU scene must be resident");
+        let cached = CachedGpuScene {
+            identity,
+            coverage,
+            resolution_x,
+            resolution_y,
+            scene: scene.clone(),
+        };
+        let scene_key = gpu_scene_key(identity, coverage, prepared.width, prepared.height);
+        {
+            let mut scenes = self
+                .scenes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _evicted = scenes.insert(scene_key, cached, scene_bytes);
+        }
+        let (target_width, target_height) = gpu_target_dimensions(request);
         let rgba = self
             .renderer
-            .render_rgba(scene)
+            .render_rgba_with_view(
+                &scene,
+                target_width,
+                target_height,
+                scene_view_transform(coverage, requested_coverage),
+            )
             .map_err(|error| RasterizeError::Unavailable(error.to_string()))?;
-        encode_gpu_output(request, prepared.crop_pixels, rgba)
+        crop_gpu_rgba(request, prepared_request.buffer_pixels, rgba)
+    }
+}
+
+impl VectorRasterizer for GpuVectorRasterizer {
+    fn render(&self, request: &VectorRasterRequest) -> Result<RasterizedImage, RasterizeError> {
+        encode_gpu_rgba(request, self.render_raw_rgba(request)?)
+    }
+
+    fn render_rgba(&self, request: &VectorRasterRequest) -> Result<RasterizedRgba, RasterizeError> {
+        self.render_raw_rgba(request)
     }
 }
 
@@ -310,9 +363,33 @@ fn prepared_pattern_atlases(scene: &cangling_gdal_core::PreparedVectorScene) -> 
         .collect()
 }
 
-fn gpu_scene_key(request: &VectorRasterRequest) -> u64 {
+fn gpu_scene_identity(request: &VectorRasterRequest) -> u64 {
+    let mut normalized = request.clone();
+    normalized.rules.retain(|rule| {
+        rule.minimum_scale_denominator
+            .is_none_or(|minimum| request.scale_denominator >= minimum)
+            && rule
+                .maximum_scale_denominator
+                .is_none_or(|maximum| request.scale_denominator < maximum)
+    });
+    for rule in &mut normalized.rules {
+        rule.minimum_scale_denominator = None;
+        rule.maximum_scale_denominator = None;
+    }
+    // The scene identity is determined by the resulting active rules, not an
+    // exact floating-point scale value, so same-zoom requests can reuse it.
+    normalized.scale_denominator = 0.0;
+    normalized.bbox = BoundingBox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 1.0,
+        max_y: 1.0,
+    };
+    normalized.width = 1;
+    normalized.height = 1;
+    normalized.format = ImageFormat::Png;
     let mut hasher = DefaultHasher::new();
-    format!("{request:?}").hash(&mut hasher);
+    format!("{normalized:?}").hash(&mut hasher);
     if let Ok(metadata) = std::fs::metadata(&request.source.path) {
         metadata.len().hash(&mut hasher);
         metadata.modified().ok().hash(&mut hasher);
@@ -320,8 +397,108 @@ fn gpu_scene_key(request: &VectorRasterRequest) -> u64 {
     hasher.finish()
 }
 
+fn gpu_scene_key(identity: u64, coverage: BoundingBox, width: u32, height: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    identity.hash(&mut hasher);
+    for value in [
+        coverage.min_x,
+        coverage.min_y,
+        coverage.max_x,
+        coverage.max_y,
+    ] {
+        value.to_bits().hash(&mut hasher);
+    }
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn gpu_coverage_request(request: &VectorRasterRequest) -> VectorRasterRequest {
+    if !request.allow_view_reuse {
+        return request.clone();
+    }
+    let factor = std::env::var("MAP_GPU_VIEW_OVERSCAN")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.5)
+        .clamp(1.0, 3.0);
+    if factor <= 1.0 {
+        return request.clone();
+    }
+    let center_x = (request.bbox.min_x + request.bbox.max_x) * 0.5;
+    let center_y = (request.bbox.min_y + request.bbox.max_y) * 0.5;
+    let span_x = (request.bbox.max_x - request.bbox.min_x) * factor;
+    let span_y = (request.bbox.max_y - request.bbox.min_y) * factor;
+    let mut covered = request.clone();
+    covered.bbox = BoundingBox {
+        min_x: center_x - span_x * 0.5,
+        min_y: center_y - span_y * 0.5,
+        max_x: center_x + span_x * 0.5,
+        max_y: center_y + span_y * 0.5,
+    };
+    covered.width = (f64::from(request.width) * factor).ceil() as u32;
+    covered.height = (f64::from(request.height) * factor).ceil() as u32;
+    covered
+}
+
+fn rendered_bbox(request: &VectorRasterRequest) -> BoundingBox {
+    let buffer_x = (request.bbox.max_x - request.bbox.min_x) / f64::from(request.width)
+        * f64::from(request.buffer_pixels);
+    let buffer_y = (request.bbox.max_y - request.bbox.min_y) / f64::from(request.height)
+        * f64::from(request.buffer_pixels);
+    BoundingBox {
+        min_x: request.bbox.min_x - buffer_x,
+        min_y: request.bbox.min_y - buffer_y,
+        max_x: request.bbox.max_x + buffer_x,
+        max_y: request.bbox.max_y + buffer_y,
+    }
+}
+
+fn resolution_matches(cached: f64, requested: f64) -> bool {
+    let scale = cached.abs().max(requested.abs()).max(1.0);
+    (cached - requested).abs() <= scale * 1.0e-9
+}
+
+fn bbox_contains(coverage: BoundingBox, requested: BoundingBox) -> bool {
+    coverage.min_x <= requested.min_x
+        && coverage.min_y <= requested.min_y
+        && coverage.max_x >= requested.max_x
+        && coverage.max_y >= requested.max_y
+}
+
+fn scene_view_transform(coverage: BoundingBox, requested: BoundingBox) -> ViewTransform {
+    let coverage_span_x = coverage.max_x - coverage.min_x;
+    let coverage_span_y = coverage.max_y - coverage.min_y;
+    let requested_span_x = requested.max_x - requested.min_x;
+    let requested_span_y = requested.max_y - requested.min_y;
+    let coverage_center_x = (coverage.min_x + coverage.max_x) * 0.5;
+    let coverage_center_y = (coverage.min_y + coverage.max_y) * 0.5;
+    let requested_center_x = (requested.min_x + requested.max_x) * 0.5;
+    let requested_center_y = (requested.min_y + requested.max_y) * 0.5;
+    ViewTransform {
+        scale_offset: [
+            (coverage_span_x / requested_span_x) as f32,
+            (coverage_span_y / requested_span_y) as f32,
+            (2.0 * (coverage_center_x - requested_center_x) / requested_span_x) as f32,
+            (2.0 * (coverage_center_y - requested_center_y) / requested_span_y) as f32,
+        ],
+    }
+}
+
 fn scene_crop(request: &VectorRasterRequest) -> u32 {
     request.buffer_pixels
+}
+
+fn gpu_target_dimensions(request: &VectorRasterRequest) -> (u32, u32) {
+    (
+        request
+            .width
+            .saturating_add(request.buffer_pixels.saturating_mul(2)),
+        request
+            .height
+            .saturating_add(request.buffer_pixels.saturating_mul(2)),
+    )
 }
 
 fn prepared_mesh_chunks(scene: &cangling_gdal_core::PreparedVectorScene) -> Vec<MeshChunk> {
@@ -485,11 +662,11 @@ fn build_label_page(
     })
 }
 
-fn encode_gpu_output(
+fn crop_gpu_rgba(
     request: &VectorRasterRequest,
     crop_pixels: u32,
     rgba: Vec<u8>,
-) -> Result<RasterizedImage, RasterizeError> {
+) -> Result<RasterizedRgba, RasterizeError> {
     let width = request.width.saturating_add(crop_pixels.saturating_mul(2));
     let height = request.height.saturating_add(crop_pixels.saturating_mul(2));
     let mut image = image::RgbaImage::from_raw(width, height, rgba)
@@ -504,6 +681,19 @@ fn encode_gpu_output(
         )
         .to_image();
     }
+    Ok(RasterizedRgba {
+        width: request.width,
+        height: request.height,
+        pixels: image.into_raw(),
+    })
+}
+
+fn encode_gpu_rgba(
+    request: &VectorRasterRequest,
+    rgba: RasterizedRgba,
+) -> Result<RasterizedImage, RasterizeError> {
+    let image = image::RgbaImage::from_raw(rgba.width, rgba.height, rgba.pixels)
+        .ok_or_else(|| RasterizeError::Backend("invalid GPU RGBA output".into()))?;
     let mut bytes = Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image)
         .write_to(
@@ -693,6 +883,123 @@ fn filter_to_ogr_sql(filter: &Filter) -> Result<String, RasterizeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gpu_request() -> VectorRasterRequest {
+        VectorRasterRequest {
+            source: map_render::VectorSource {
+                path: "fixture.shp".into(),
+                layer: None,
+                encoding: None,
+            },
+            target_crs: "EPSG:3857".into(),
+            bbox: BoundingBox {
+                min_x: 10.0,
+                min_y: 20.0,
+                max_x: 30.0,
+                max_y: 40.0,
+            },
+            width: 1000,
+            height: 500,
+            buffer_pixels: 0,
+            allow_view_reuse: true,
+            simplify_tolerance: None,
+            format: ImageFormat::Png,
+            rules: Vec::new(),
+            scale_denominator: 10_000.0,
+            background: map_core::Rgba {
+                red: 0,
+                green: 0,
+                blue: 0,
+                alpha: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn overscanned_gpu_coverage_preserves_resolution_and_contains_small_pans() {
+        let request = gpu_request();
+        let covered = gpu_coverage_request(&request);
+
+        assert_eq!(covered.width, 1500);
+        assert_eq!(covered.height, 750);
+        assert_eq!(covered.bbox.min_x, 5.0);
+        assert_eq!(covered.bbox.min_y, 15.0);
+        assert_eq!(covered.bbox.max_x, 35.0);
+        assert_eq!(covered.bbox.max_y, 45.0);
+        assert!(resolution_matches(
+            (covered.bbox.max_x - covered.bbox.min_x) / f64::from(covered.width),
+            (request.bbox.max_x - request.bbox.min_x) / f64::from(request.width),
+        ));
+        assert!(bbox_contains(covered.bbox, request.bbox));
+        assert!(bbox_contains(
+            covered.bbox,
+            BoundingBox {
+                min_x: 12.0,
+                min_y: 21.0,
+                max_x: 32.0,
+                max_y: 41.0,
+            }
+        ));
+        assert!(!bbox_contains(
+            covered.bbox,
+            BoundingBox {
+                min_x: 16.0,
+                min_y: 21.0,
+                max_x: 36.0,
+                max_y: 41.0,
+            }
+        ));
+    }
+
+    #[test]
+    fn view_transform_maps_coverage_center_and_pan_to_requested_view() {
+        let coverage = BoundingBox {
+            min_x: 5.0,
+            min_y: 15.0,
+            max_x: 35.0,
+            max_y: 45.0,
+        };
+        let centered = scene_view_transform(coverage, gpu_request().bbox);
+        assert_eq!(centered.scale_offset, [1.5, 1.5, 0.0, 0.0]);
+
+        let panned = scene_view_transform(
+            coverage,
+            BoundingBox {
+                min_x: 12.0,
+                min_y: 21.0,
+                max_x: 32.0,
+                max_y: 41.0,
+            },
+        );
+        assert_eq!(panned.scale_offset, [1.5, 1.5, -0.2, -0.1]);
+    }
+
+    #[test]
+    fn buffered_wms_view_reuse_compares_the_actual_rendered_extent() {
+        let mut request = gpu_request();
+        request.buffer_pixels = 64;
+        let covered = gpu_coverage_request(&request);
+        let covered_extent = rendered_bbox(&covered);
+        let mut panned = request.clone();
+        panned.bbox.min_x += 2.0;
+        panned.bbox.max_x += 2.0;
+        panned.bbox.min_y += 1.0;
+        panned.bbox.max_y += 1.0;
+
+        assert!(bbox_contains(covered_extent, rendered_bbox(&request)));
+        assert!(bbox_contains(covered_extent, rendered_bbox(&panned)));
+    }
+
+    #[test]
+    fn gpu_scene_identity_ignores_scale_drift_when_active_rules_are_unchanged() {
+        let first = gpu_request();
+        let mut panned = first.clone();
+        panned.bbox.min_x += 1.0;
+        panned.bbox.max_x += 1.0;
+        panned.scale_denominator += 123.456;
+
+        assert_eq!(gpu_scene_identity(&first), gpu_scene_identity(&panned));
+    }
 
     fn image_rule(where_clause: Option<&str>, path: &str) -> GdalVectorRenderRule {
         GdalVectorRenderRule {

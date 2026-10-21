@@ -83,6 +83,9 @@ pub struct VectorRasterRequest {
     pub height: u32,
     /// Extra pixels rendered around each edge before cropping to the requested size.
     pub buffer_pixels: u32,
+    /// Allow the GPU backend to prepare a larger resident viewport so nearby
+    /// WMS pans can reuse geometry. Tile requests should leave this disabled.
+    pub allow_view_reuse: bool,
     /// Topology-preserving simplification tolerance in target CRS units.
     pub simplify_tolerance: Option<f64>,
     pub format: ImageFormat,
@@ -95,6 +98,13 @@ pub struct VectorRasterRequest {
 pub struct RasterizedImage {
     pub bytes: Vec<u8>,
     pub content_type: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterizedRgba {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -113,6 +123,22 @@ pub enum RasterizeError {
 /// Implementations may use GDAL, a CPU renderer or a GPU renderer.
 pub trait VectorRasterizer: Send + Sync {
     fn render(&self, request: &VectorRasterRequest) -> Result<RasterizedImage, RasterizeError>;
+
+    /// Returns unencoded RGBA pixels for composition. Backends can override
+    /// this to avoid an encode/decode round trip between member layers and the
+    /// final WMS/WMTS group image.
+    fn render_rgba(&self, request: &VectorRasterRequest) -> Result<RasterizedRgba, RasterizeError> {
+        let image = self.render(request)?;
+        let rgba = image::load_from_memory(&image.bytes)
+            .map_err(|error| RasterizeError::Backend(error.to_string()))?
+            .to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok(RasterizedRgba {
+            width,
+            height,
+            pixels: rgba.into_raw(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -189,6 +215,27 @@ impl VectorRasterizer for FallbackVectorRasterizer {
         }
         self.fallback_requests.fetch_add(1, Ordering::Relaxed);
         self.fallback.render(request)
+    }
+
+    fn render_rgba(&self, request: &VectorRasterRequest) -> Result<RasterizedRgba, RasterizeError> {
+        if self.primary_enabled.load(Ordering::Acquire) {
+            self.primary_attempts.fetch_add(1, Ordering::Relaxed);
+            match self.primary.render_rgba(request) {
+                Ok(image) => {
+                    self.primary_successes.fetch_add(1, Ordering::Relaxed);
+                    return Ok(image);
+                }
+                Err(error) => {
+                    self.primary_failures.fetch_add(1, Ordering::Relaxed);
+                    if matches!(error, RasterizeError::Unavailable(_)) {
+                        self.primary_enabled.store(false, Ordering::Release);
+                    }
+                    tracing::warn!(%error, "primary vector rasterizer failed; using fallback");
+                }
+            }
+        }
+        self.fallback_requests.fetch_add(1, Ordering::Relaxed);
+        self.fallback.render_rgba(request)
     }
 }
 
@@ -289,6 +336,7 @@ mod tests {
             width: 1,
             height: 1,
             buffer_pixels: 0,
+            allow_view_reuse: false,
             simplify_tolerance: None,
             format: ImageFormat::Png,
             rules: Vec::new(),

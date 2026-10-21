@@ -91,6 +91,8 @@ VECTOR_PROJECTION_METATILE_FACTOR=4
 MAP_RENDER_BACKEND=auto \
 MAP_GPU_ADAPTER=NVIDIA \
 MAP_GPU_SCENE_CACHE_MB=1024 \
+MAP_GPU_TARGET_POOL_MB=512 \
+MAP_GPU_VIEW_OVERSCAN=1.5 \
 cargo run --release -p map-server
 ```
 
@@ -99,14 +101,18 @@ cargo run --release -p map-server
 | `MAP_RENDER_BACKEND` | `cpu` | `cpu`、`gpu` 或 `auto`；生产试运行建议使用 `auto` |
 | `MAP_GPU_ADAPTER` | 空 | 可选的显卡名称片段，例如 `NVIDIA`；为空时选择系统默认适配器 |
 | `MAP_GPU_SCENE_CACHE_MB` | `1024` | 已投影网格、边界和标签图集的显存 LRU 预算 |
+| `MAP_GPU_TARGET_POOL_MB` | `512` | 可复用离屏纹理、MSAA 纹理和回读缓冲的显存预算 |
+| `MAP_GPU_VIEW_OVERSCAN` | `1.5` | WMS 驻留视口相对请求范围的扩展倍数，限制为 `1.0`–`3.0`；`1.0` 表示关闭平移复用 |
 
 `auto` 模式遇到某一请求暂不支持的符号器时，只将该请求降级到 CPU；如果 GPU
 设备不可用，则触发进程内熔断，后续请求直接使用 CPU。`/api/metrics` 返回当前后端、
 GPU 成功/失败/降级次数、场景缓存条目、命中率和驻留字节数。
 
-GPU 场景缓存以完整渲染请求为键。首次请求仍需完成 GDAL 查询、投影、三角化和标签
-布局；同一 WMS 请求再次执行时，可直接复用显存中的网格和标签图集。WMTS 最终图片
-仍优先使用瓦片缓存。部署时必须给容器暴露兼容 Vulkan 的 GPU；NVIDIA Docker 环境
+GPU 首次处理 WMS 请求时，会按 `MAP_GPU_VIEW_OVERSCAN` 准备一个更大的驻留视口；相同
+CRS、分辨率和生效样式规则下，只要后续平移范围仍包含在驻留视口内，就能直接复用显存中的
+网格、边界和标签图集。渲染目标与回读缓冲独立池化，不再随每个场景重复占用显存；图层组
+成员并行准备并直接以 RGBA 合成，避免中间 PNG 编解码。WMTS 不启用视口扩展，仍优先使用
+最终瓦片缓存。部署时必须给容器暴露兼容 Vulkan 的 GPU；NVIDIA Docker 环境
 通常还需配置 NVIDIA Container Toolkit 和 `gpus: all`。ARM64 或没有 GPU 的节点应保留
 `cpu`，或使用 `auto` 确保安全降级。
 

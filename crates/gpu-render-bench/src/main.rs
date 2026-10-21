@@ -1120,6 +1120,7 @@ fn real_service_request() -> VectorRasterRequest {
         width: 1024,
         height: 1024,
         buffer_pixels: 2,
+        allow_view_reuse: false,
         simplify_tolerance: None,
         format: ImageFormat::Png,
         rules: vec![ServiceRenderRule {

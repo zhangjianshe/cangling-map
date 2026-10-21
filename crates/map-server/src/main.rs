@@ -34,7 +34,7 @@ use map_catalog::{
 };
 use map_render::{
     blank_image, blank_png, FallbackRasterizerStats, FallbackVectorRasterizer,
-    ImageFormat as RenderImageFormat, VectorColor, VectorImageFill, VectorPaint,
+    ImageFormat as RenderImageFormat, RasterizedRgba, VectorColor, VectorImageFill, VectorPaint,
     VectorRasterRequest as RenderVectorRequest, VectorRasterizer, VectorRenderRule, VectorSource,
     VectorTextStyle,
 };
@@ -1634,20 +1634,19 @@ fn compose_images(
     width: u32,
     height: u32,
     background: [u8; 4],
-    layers: &[(Vec<u8>, f64)],
+    layers: Vec<(RasterizedRgba, f64)>,
     format: ImageFormat,
 ) -> Result<cangling_gdal_core::RenderedImage, String> {
     use image::{DynamicImage, ImageFormat as EncoderFormat, Rgba, RgbaImage};
     use std::io::Cursor;
 
     let mut canvas = RgbaImage::from_pixel(width, height, Rgba(background));
-    for (bytes, opacity) in layers {
-        let image = image::load_from_memory(bytes)
-            .map_err(|error| format!("无法解码成员图层：{error}"))?
-            .to_rgba8();
-        if image.dimensions() != (width, height) {
+    for (layer, opacity) in layers {
+        if (layer.width, layer.height) != (width, height) {
             return Err("成员图层输出尺寸不一致".into());
         }
+        let image = RgbaImage::from_raw(layer.width, layer.height, layer.pixels)
+            .ok_or_else(|| "成员图层 RGBA 数据长度无效".to_owned())?;
         let opacity = opacity.clamp(0.0, 1.0) as f32;
         for (dst, src) in canvas.pixels_mut().zip(image.pixels()) {
             let source_alpha = src[3] as f32 / 255.0 * opacity;
@@ -1884,6 +1883,7 @@ fn render_vector_request(
         width,
         height,
         buffer_pixels,
+        allow_view_reuse: false,
         simplify_tolerance,
         format: match format {
             ImageFormat::Png => RenderImageFormat::Png,
@@ -2813,53 +2813,32 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
         .find(|group| group.enabled && group.name == layer_name)
     {
         let request_scale = scale_denominator(&crs, &bbox, logical_width, logical_height);
-        let mut rendered = Vec::new();
-        for member in &group.members {
-            let Some(layer) = layers
-                .iter()
-                .find(|layer| layer.enabled && layer.id == member.published_layer_id)
-            else {
-                continue;
-            };
-            if !layer.supported_crs.is_empty()
-                && !layer
-                    .supported_crs
-                    .iter()
-                    .any(|supported| supported.0.eq_ignore_ascii_case(&crs))
-            {
-                continue;
+        let rendered = match render_group_members(
+            &state,
+            &layers,
+            &group.members,
+            crs.clone(),
+            bbox,
+            width,
+            height,
+            request_scale,
+            0,
+            pixel_ratio,
+            true,
+        )
+        .await
+        {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                return xml_exception(StatusCode::UNPROCESSABLE_ENTITY, "NoApplicableCode", &error)
             }
-            match render_group_member(
-                &state,
-                layer,
-                member,
-                crs.clone(),
-                bbox,
-                width,
-                height,
-                request_scale,
-                0,
-                pixel_ratio,
-            )
-            .await
-            {
-                Ok(Some(bytes)) => rendered.push((bytes, member.opacity)),
-                Ok(None) => {}
-                Err(error) => {
-                    return xml_exception(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "NoApplicableCode",
-                        &error,
-                    )
-                }
-            }
-        }
+        };
         let background = if transparent {
             [0, 0, 0, 0]
         } else {
             [255, 255, 255, 255]
         };
-        return match compose_images(width, height, background, &rendered, image_format) {
+        return match compose_images(width, height, background, rendered, image_format) {
             Ok(image) => (
                 StatusCode::OK,
                 [
@@ -3022,6 +3001,7 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
                 rendering_style,
             );
             request.scale_denominator = request_scale;
+            request.allow_view_reuse = true;
             vector_rasterizer
                 .render(&request)
                 .map(|image| cangling_gdal_core::RenderedImage {
@@ -3081,7 +3061,8 @@ async fn render_group_member(
     request_scale: f64,
     buffer_pixels: u32,
     symbol_scale: f32,
-) -> Result<Option<Vec<u8>>, String> {
+    allow_view_reuse: bool,
+) -> Result<Option<RasterizedRgba>, String> {
     let min_scale = member.min_scale_denominator.or(layer.min_scale_denominator);
     let max_scale = member.max_scale_denominator.or(layer.max_scale_denominator);
     if !scale_is_visible(min_scale, max_scale, request_scale) {
@@ -3159,7 +3140,19 @@ async fn render_group_member(
                 format: ImageFormat::Png,
                 nodata: Some(0.0),
             })
-            .map(|image| Some(image.bytes))
+            .and_then(|image| {
+                let rgba = image::load_from_memory(&image.bytes)
+                    .map_err(|error| {
+                        cangling_gdal_core::GdalError::InvalidRequest(error.to_string())
+                    })?
+                    .to_rgba8();
+                let (width, height) = rgba.dimensions();
+                Ok(Some(RasterizedRgba {
+                    width,
+                    height,
+                    pixels: rgba.into_raw(),
+                }))
+            })
             .map_err(|error| error.to_string()),
         SourceKind::Vector => {
             let mut request = render_vector_request(
@@ -3174,14 +3167,82 @@ async fn render_group_member(
                 rendering_style,
             );
             request.scale_denominator = request_scale;
+            request.allow_view_reuse = allow_view_reuse;
             vector_rasterizer
-                .render(&request)
-                .map(|image| Some(image.bytes))
+                .render_rgba(&request)
+                .map(Some)
                 .map_err(|error| error.to_string())
         }
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_group_members(
+    state: &AppState,
+    layers: &[PublishedLayer],
+    members: &[LayerGroupMember],
+    target_crs: String,
+    bbox: GdalBoundingBox,
+    width: u32,
+    height: u32,
+    request_scale: f64,
+    buffer_pixels: u32,
+    symbol_scale: f32,
+    allow_view_reuse: bool,
+) -> Result<Vec<(RasterizedRgba, f64)>, String> {
+    let mut jobs = tokio::task::JoinSet::new();
+    for (order, member) in members.iter().enumerate() {
+        let Some(layer) = layers
+            .iter()
+            .find(|layer| layer.enabled && layer.id == member.published_layer_id)
+        else {
+            continue;
+        };
+        if !layer.supported_crs.is_empty()
+            && !layer
+                .supported_crs
+                .iter()
+                .any(|supported| supported.0.eq_ignore_ascii_case(&target_crs))
+        {
+            continue;
+        }
+        let state = state.clone();
+        let layer = layer.clone();
+        let member = member.clone();
+        let target_crs = target_crs.clone();
+        jobs.spawn(async move {
+            let opacity = member.opacity;
+            let rendered = render_group_member(
+                &state,
+                &layer,
+                &member,
+                target_crs,
+                bbox,
+                width,
+                height,
+                request_scale,
+                buffer_pixels,
+                symbol_scale,
+                allow_view_reuse,
+            )
+            .await;
+            (order, opacity, rendered)
+        });
+    }
+    let mut rendered = Vec::new();
+    while let Some(result) = jobs.join_next().await {
+        let (order, opacity, image) = result.map_err(|error| error.to_string())?;
+        if let Some(image) = image? {
+            rendered.push((order, image, opacity));
+        }
+    }
+    rendered.sort_by_key(|(order, _, _)| *order);
+    Ok(rendered
+        .into_iter()
+        .map(|(_, image, opacity)| (image, opacity))
+        .collect())
 }
 fn xml_exception(status: StatusCode, code: &str, message: &str) -> Response {
     (
@@ -3709,45 +3770,36 @@ async fn serve_wmts_group_tile(
         }
     };
     let request_scale = scale_denominator("EPSG:3857", &bbox, 256, 256);
-    let mut rendered = Vec::new();
-    for member in &group.members {
-        let Some(layer) = layers
-            .iter()
-            .find(|layer| layer.enabled && layer.id == member.published_layer_id)
-        else {
-            continue;
-        };
-        match render_group_member(
-            &state,
-            layer,
-            member,
-            "EPSG:3857".into(),
-            bbox,
-            output_size,
-            output_size,
-            request_scale,
-            2 * u32::from(tile.pixel_ratio),
-            f32::from(tile.pixel_ratio),
-        )
-        .await
-        {
-            Ok(Some(bytes)) => rendered.push((bytes, member.opacity)),
-            Ok(None) => {}
-            Err(error) => {
-                return wmts_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "NoApplicableCode",
-                    "GetTile",
-                    &error,
-                )
-            }
+    let rendered = match render_group_members(
+        &state,
+        &layers,
+        &group.members,
+        "EPSG:3857".into(),
+        bbox,
+        output_size,
+        output_size,
+        request_scale,
+        2 * u32::from(tile.pixel_ratio),
+        f32::from(tile.pixel_ratio),
+        false,
+    )
+    .await
+    {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return wmts_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                "GetTile",
+                &error,
+            )
         }
-    }
+    };
     let bytes = match compose_images(
         output_size,
         output_size,
         [0, 0, 0, 0],
-        &rendered,
+        rendered,
         ImageFormat::Png,
     ) {
         Ok(image) => image.bytes,
