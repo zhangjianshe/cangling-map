@@ -1,0 +1,13 @@
+services:
+  cangling-map:
+    environment:
+      MAP_RENDER_BACKEND: auto
+      MAP_GPU_ADAPTER: NVIDIA
+      MAP_GPU_SCENE_CACHE_MB: 1024
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cangling-map
+  namespace: cangling-map
+spec:
+  template:
+    spec:
+      containers:
+        - name: cangling-map
+          env:
+            - name: MAP_RENDER_BACKEND
+              value: auto
+            - name: MAP_GPU_ADAPTER
+              value: NVIDIA
+            - name: MAP_GPU_SCENE_CACHE_MB
+              value: "1024"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"

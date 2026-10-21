@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - k3s.yaml
+patches:
+  - path: k3s-gpu-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: cangling-map
+      namespace: cangling-map

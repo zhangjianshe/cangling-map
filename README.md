@@ -110,6 +110,25 @@ GPU 场景缓存以完整渲染请求为键。首次请求仍需完成 GDAL 查�
 通常还需配置 NVIDIA Container Toolkit 和 `gpus: all`。ARM64 或没有 GPU 的节点应保留
 `cpu`，或使用 `auto` 确保安全降级。
 
+Docker 主机安装 NVIDIA Container Toolkit 后，可使用 GPU 覆盖文件启动：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+docker compose exec cangling-map sh -c 'ls /dev/nvidia*'
+curl http://127.0.0.1:3000/api/metrics
+```
+
+K3s 需要先安装 NVIDIA device plugin，再通过仓库提供的 Kustomize overlay 部署：
+
+```bash
+kubectl apply -k deploy
+```
+
+该 overlay 会把 [`deploy/k3s-gpu-patch.yaml`](deploy/k3s-gpu-patch.yaml) 合并到
+基础部署。每个声明
+`nvidia.com/gpu: 1` 的 Cangling Map Pod 会独占一个 GPU 资源；GPU 数少于副本数时，
+应只给部分副本应用该补丁，其余副本继续作为 CPU 节点。
+
 ## Docker Compose
 
 仓库提供 [docker-compose.yml](docker-compose.yml)。其中数据和缓存使用两个独立卷：
