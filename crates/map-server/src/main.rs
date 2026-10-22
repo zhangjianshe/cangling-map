@@ -46,7 +46,7 @@ use ogc_wms::{
 use ogc_wmts::{
     capabilities_xml as wmts_capabilities_xml, exception_xml as wmts_exception_xml, tile_bounds,
     CapabilitiesLayer as WmtsCapabilitiesLayer, Operation as WmtsOperation, TileRequest,
-    WmtsRequest,
+    WmtsRequest, MAX_ZOOM, WEB_MERCATOR_HALF_WORLD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -653,6 +653,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/wms", get(wms))
         .route("/wmts", get(wmts))
+        .route("/{workspace}/wms", get(geoserver_workspace_wms))
+        .route("/geoserver/{workspace}/wms", get(geoserver_workspace_wms))
         .route("/api/catalog", get(list_catalog).post(create_catalog_item))
         .route("/api/host-files", axum::routing::post(list_host_files))
         .route("/api/catalog/{id}/features", get(preview_catalog_features))
@@ -2671,7 +2673,32 @@ async fn wms(
     }
 }
 
+async fn geoserver_workspace_wms(
+    Path(workspace): Path<String>,
+    State(state): State<AppState>,
+    Query(mut parameters): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some((_, layers)) = parameters
+        .iter_mut()
+        .find(|(key, _)| key.eq_ignore_ascii_case("LAYERS"))
+    {
+        let prefix = format!("{workspace}:");
+        if let Some(layer) = layers.strip_prefix(&prefix) {
+            *layers = layer.to_owned();
+        }
+    }
+    wms(State(state), Query(parameters)).await
+}
+
 async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> Response {
+    // GeoServer clients commonly use tiled WMS (256px, EPSG:3857, aligned
+    // BBOX) instead of issuing WMTS GetTile directly. Translate that request
+    // to the native WMTS path so it shares cache keys, request coalescing and
+    // the configured cangling-tile backend. Non-aligned tiled requests retain
+    // normal WMS rendering semantics.
+    if let Some(tile) = tiled_wms_tile_request(&parameters) {
+        return serve_wmts_tile(state, tile).await;
+    }
     let required = |name: &'static str| {
         parameters
             .get(name)
@@ -3043,6 +3070,84 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             &error.to_string(),
         ),
     }
+}
+
+fn tiled_wms_tile_request(parameters: &HashMap<String, String>) -> Option<TileRequest> {
+    if !parameters
+        .get("TILED")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+    {
+        return None;
+    }
+    let crs = parameters.get("CRS").or_else(|| parameters.get("SRS"))?;
+    if !crs.eq_ignore_ascii_case("EPSG:3857") && !crs.eq_ignore_ascii_case("EPSG:900913") {
+        return None;
+    }
+    let width = parameters.get("WIDTH")?.parse::<u32>().ok()?;
+    let height = parameters.get("HEIGHT")?.parse::<u32>().ok()?;
+    if width != height || !matches!(width, 256 | 512) {
+        return None;
+    }
+    let pixel_ratio = (width / 256) as u8;
+    let bbox = parameters
+        .get("BBOX")?
+        .split(',')
+        .map(|value| value.trim().parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let [min_x, min_y, max_x, max_y] = bbox.as_slice() else {
+        return None;
+    };
+    let span_x = max_x - min_x;
+    let span_y = max_y - min_y;
+    if !span_x.is_finite() || !span_y.is_finite() || span_x <= 0.0 {
+        return None;
+    }
+    let span_tolerance = span_x.abs().max(1.0) * 1.0e-7;
+    if (span_x - span_y).abs() > span_tolerance {
+        return None;
+    }
+    let world_span = WEB_MERCATOR_HALF_WORLD * 2.0;
+    let zoom_value = (world_span / span_x).log2();
+    let zoom = zoom_value.round();
+    if !zoom.is_finite()
+        || (zoom_value - zoom).abs() > 1.0e-7
+        || zoom < 0.0
+        || zoom > f64::from(MAX_ZOOM)
+    {
+        return None;
+    }
+    let zoom = zoom as u8;
+    let col_value = (min_x + WEB_MERCATOR_HALF_WORLD) / span_x;
+    let row_value = (WEB_MERCATOR_HALF_WORLD - max_y) / span_x;
+    let col = col_value.round();
+    let row = row_value.round();
+    if (col_value - col).abs() > 1.0e-7 || (row_value - row).abs() > 1.0e-7 {
+        return None;
+    }
+    let matrix_size = 1_u32 << zoom;
+    if col < 0.0 || row < 0.0 || col >= f64::from(matrix_size) || row >= f64::from(matrix_size) {
+        return None;
+    }
+    let requested_layer = parameters.get("LAYERS")?;
+    let layer = requested_layer
+        .rsplit_once(':')
+        .map_or_else(|| requested_layer.clone(), |(_, layer)| layer.to_owned());
+    if layer.is_empty() || layer.contains(',') {
+        return None;
+    }
+    let style = parameters
+        .get("STYLES")
+        .filter(|style| !style.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "default".to_owned());
+    Some(TileRequest {
+        layer,
+        style,
+        zoom,
+        row: row as u32,
+        col: col as u32,
+        pixel_ratio,
+    })
 }
 
 fn wms_pixel_ratio(parameters: &HashMap<String, String>) -> f32 {
@@ -4200,6 +4305,45 @@ mod tests {
         assert_eq!(configured_simplify_tolerance(None, 10.0), None);
         assert_eq!(configured_simplify_tolerance(Some(0.0), 10.0), None);
         assert_eq!(configured_simplify_tolerance(Some(0.5), 10.0), Some(5.0));
+    }
+
+    #[test]
+    fn translates_geoserver_tiled_wms_to_wmts_tile() {
+        let parameters = HashMap::from([
+            ("LAYERS".into(), "ai:china".into()),
+            ("TILED".into(), "true".into()),
+            ("SRS".into(), "EPSG:3857".into()),
+            ("WIDTH".into(), "256".into()),
+            ("HEIGHT".into(), "256".into()),
+            (
+                "BBOX".into(),
+                "0,-5009377.085697311,5009377.085697311,0".into(),
+            ),
+            ("STYLES".into(), "".into()),
+            ("TILESORIGIN".into(), "-20037508.34,-20037508.34".into()),
+        ]);
+
+        let tile = tiled_wms_tile_request(&parameters).expect("aligned tiled WMS request");
+        assert_eq!(tile.layer, "china");
+        assert_eq!(tile.style, "default");
+        assert_eq!(tile.zoom, 3);
+        assert_eq!(tile.col, 4);
+        assert_eq!(tile.row, 4);
+        assert_eq!(tile.pixel_ratio, 1);
+    }
+
+    #[test]
+    fn leaves_non_aligned_tiled_wms_on_the_wms_renderer() {
+        let parameters = HashMap::from([
+            ("LAYERS".into(), "china".into()),
+            ("TILED".into(), "true".into()),
+            ("SRS".into(), "EPSG:3857".into()),
+            ("WIDTH".into(), "256".into()),
+            ("HEIGHT".into(), "256".into()),
+            ("BBOX".into(), "1,2,257,258".into()),
+        ]);
+
+        assert!(tiled_wms_tile_request(&parameters).is_none());
     }
 
     #[test]
