@@ -1,6 +1,6 @@
-document.head.append(Object.assign(document.createElement("script"),{src:"/assets/service-frame.js"}));
+document.head.append(Object.assign(document.createElement("script"),{src:window.__canglingUrl("/assets/service-frame.js")}));
 const S={assets:[],category:"全部资源",query:"",deleting:null,uploads:[]},$=q=>document.querySelector(q),E={loading:$("#loading"),error:$("#error"),empty:$("#empty"),list:$("#asset-list"),none:$("#none"),summary:$("#summary"),categories:$("#categories"),upload:$("#upload-dialog"),uploadFile:$("#upload-file"),dropzone:$("#upload-dropzone"),uploadFiles:$("#upload-files"),uploadCategory:$("#upload-category"),uploadCount:$("#upload-count"),uploadError:$("#upload-error"),uploadSubmit:$("#upload-submit"),confirm:$("#delete-dialog"),deleteError:$("#delete-error"),deleteSubmit:$("#delete-submit"),toast:$("#toast")};
-const esc=(v="")=>String(v).replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])),assetUrl=path=>"/style-assets/"+path.split("/").map(encodeURIComponent).join("/");
+const esc=(v="")=>String(v).replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c])),assetUrl=path=>window.__canglingUrl("/style-assets/"+path.split("/").map(encodeURIComponent).join("/"));
 const DELETE_ICON='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>';
 async function api(url,opt={}){const r=await fetch(url,opt);if(!r.ok){let body={};try{body=await r.json()}catch{}throw Error(body.error||`请求失败（${r.status}）`)}return r.status===204?null:r.json()}
 function view(name){["loading","error","empty"].forEach(key=>E[key].classList.toggle("hidden",key!==name));E.list.classList.toggle("hidden",name!=="list")}

@@ -1,4 +1,4 @@
-document.head.append(Object.assign(document.createElement("script"),{src:"/assets/service-frame.js"}));
+document.head.append(Object.assign(document.createElement("script"),{src:window.__canglingUrl("/assets/service-frame.js")}));
 const $=q=>document.querySelector(q),form=$("#cache-form"),enabled=$("#enabled"),baseUrl=$("#base-url"),databaseId=$("#database-id"),token=$("#token"),clearToken=$("#clear-token"),save=$("#save"),error=$("#form-error"),toast=$("#toast");
 async function api(url,opt={}){const response=await fetch(url,{headers:{"Content-Type":"application/json"},...opt});if(!response.ok){let body={};try{body=await response.json()}catch{}throw Error(body.error||`请求失败（${response.status}）`)}return response.json()}
 function backendName(value){return({filesystem:"本地文件缓存","cangling-tile":"Cangling Tile",none:"未启用缓存"})[value]||value}

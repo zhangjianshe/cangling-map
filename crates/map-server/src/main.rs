@@ -927,36 +927,106 @@ async fn list_host_files(headers: HeaderMap, Json(query): Json<HostFilesQuery>) 
     .into_response()
 }
 
-fn management_page(template: &str) -> Html<String> {
-    Html(
-        template
-            .replace("{{MAP_VERSION}}", env!("CARGO_PKG_VERSION"))
-            .replace("{{MAP_BUILD_DATE}}", env!("MAP_BUILD_DATE")),
-    )
+fn normalize_forwarded_prefix(value: &str) -> Option<String> {
+    let prefix = value.split(',').next()?.trim().trim_end_matches('/');
+    if prefix.is_empty() {
+        return Some(String::new());
+    }
+    if prefix.len() > 256
+        || !prefix.starts_with('/')
+        || prefix.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~'))
+        })
+        || prefix
+            .split('/')
+            .skip(1)
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    Some(prefix.to_owned())
 }
-async fn index() -> Html<String> {
-    management_page(include_str!("../web/index.html"))
+
+fn forwarded_prefix(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-prefix")
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_forwarded_prefix)
+        .unwrap_or_default()
 }
-async fn published_page() -> Html<String> {
-    management_page(include_str!("../web/published.html"))
+
+fn forwarded_service_url(headers: &HeaderMap, route: &str) -> Option<String> {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()?
+        .trim();
+    if host.is_empty()
+        || host.len() > 255
+        || host.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'-' | b'_' | b':' | b'[' | b']'))
+        })
+    {
+        return None;
+    }
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+    Some(format!(
+        "{scheme}://{host}{}{route}",
+        forwarded_prefix(headers)
+    ))
 }
-async fn published_preview_page() -> Html<String> {
-    management_page(include_str!("../web/preview.html"))
+
+fn management_page(template: &str, headers: &HeaderMap) -> Html<String> {
+    let prefix = forwarded_prefix(headers);
+    let mut document = template
+        .replace("{{MAP_VERSION}}", env!("CARGO_PKG_VERSION"))
+        .replace("{{MAP_BUILD_DATE}}", env!("MAP_BUILD_DATE"));
+    if !prefix.is_empty() {
+        document = document
+            .replace("href=\"/", &format!("href=\"{prefix}/"))
+            .replace("src=\"/", &format!("src=\"{prefix}/"))
+            .replace("url(\"/", &format!("url(\"{prefix}/"))
+            .replace("url('/", &format!("url('{prefix}/"));
+    }
+    let prefix_json = serde_json::to_string(&prefix).expect("prefix serialization cannot fail");
+    let bootstrap = format!(
+        r#"<meta name="cangling-base-path" content="{prefix}"><script>(()=>{{const prefix={prefix_json};const url=value=>{{if(typeof value!=="string"||!value.startsWith("/")||!prefix||value===prefix||value.startsWith(prefix+"/"))return value;return prefix+value}};const rewriteAnchor=anchor=>{{const href=anchor?.getAttribute?.("href"),resolved=url(href);if(resolved!==href)anchor.setAttribute("href",resolved)}};const rewriteTree=root=>{{if(root?.matches?.('a[href^="/"]'))rewriteAnchor(root);root?.querySelectorAll?.('a[href^="/"]').forEach(rewriteAnchor)}};window.__canglingBasePath=prefix;window.__canglingUrl=url;const nativeFetch=window.fetch.bind(window);window.fetch=(input,init)=>nativeFetch(typeof input==="string"?url(input):input,init);document.addEventListener("click",event=>rewriteAnchor(event.target.closest?.('a[href^="/"]')),true);document.addEventListener("DOMContentLoaded",()=>{{rewriteTree(document);new MutationObserver(records=>records.forEach(record=>{{rewriteAnchor(record.target);record.addedNodes.forEach(rewriteTree)}})).observe(document.body,{{subtree:true,childList:true,attributes:true,attributeFilter:["href"]}})}})}})();</script>"#
+    );
+    Html(document.replacen("<head>", &format!("<head>{bootstrap}"), 1))
 }
-async fn layer_groups_page() -> Html<String> {
-    management_page(include_str!("../web/groups.html"))
+async fn index(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/index.html"), &headers)
 }
-async fn style_management_page() -> Html<String> {
-    management_page(include_str!("../web/style-editor.html"))
+async fn published_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/published.html"), &headers)
 }
-async fn style_assets_page() -> Html<String> {
-    management_page(include_str!("../web/style-assets.html"))
+async fn published_preview_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/preview.html"), &headers)
 }
-async fn metrics_page() -> Html<String> {
-    management_page(include_str!("../web/metrics.html"))
+async fn layer_groups_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/groups.html"), &headers)
 }
-async fn cache_settings_page() -> Html<String> {
-    management_page(include_str!("../web/cache-settings.html"))
+async fn style_management_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/style-editor.html"), &headers)
+}
+async fn style_assets_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/style-assets.html"), &headers)
+}
+async fn metrics_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/metrics.html"), &headers)
+}
+async fn cache_settings_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/cache-settings.html"), &headers)
 }
 
 async fn get_cache_service_settings(State(state): State<AppState>) -> Response {
@@ -2938,6 +3008,7 @@ fn api_message(status: StatusCode, message: &str) -> Response {
 
 async fn wms(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(parameters): Query<HashMap<String, String>>,
 ) -> Response {
     match WmsRequest::from_query(parameters) {
@@ -3018,8 +3089,14 @@ async fn wms(
                 .filter(|layer| !grouped_layer_ids.contains(&layer.id))
                 .collect::<Vec<_>>();
             layers.sort_by(|a, b| a.name.cmp(&b.name));
-            let service_url = std::env::var("WMS_PUBLIC_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3000/wms".into());
+            let service_url = if headers.contains_key("x-forwarded-prefix") {
+                forwarded_service_url(&headers, "/wms")
+            } else {
+                std::env::var("WMS_PUBLIC_URL")
+                    .ok()
+                    .or_else(|| forwarded_service_url(&headers, "/wms"))
+            }
+            .unwrap_or_else(|| "http://127.0.0.1:3000/wms".into());
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "text/xml; charset=utf-8")],
@@ -3046,6 +3123,7 @@ async fn wms(
 async fn geoserver_workspace_wms(
     Path(workspace): Path<String>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(mut parameters): Query<HashMap<String, String>>,
 ) -> Response {
     if let Some((_, layers)) = parameters
@@ -3054,7 +3132,7 @@ async fn geoserver_workspace_wms(
     {
         *layers = normalize_wms_layer_name(layers, Some(&workspace));
     }
-    wms(State(state), Query(parameters)).await
+    wms(State(state), headers, Query(parameters)).await
 }
 
 async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>) -> Response {
@@ -3758,6 +3836,7 @@ fn xml_exception(status: StatusCode, code: &str, message: &str) -> Response {
 
 async fn wmts(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(parameters): Query<HashMap<String, String>>,
 ) -> Response {
     let request = match WmtsRequest::from_query(parameters) {
@@ -3808,8 +3887,14 @@ async fn wmts(
                     )
                 }
             }
-            let service_url = std::env::var("WMTS_PUBLIC_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3000/wmts".into());
+            let service_url = if headers.contains_key("x-forwarded-prefix") {
+                forwarded_service_url(&headers, "/wmts")
+            } else {
+                std::env::var("WMTS_PUBLIC_URL")
+                    .ok()
+                    .or_else(|| forwarded_service_url(&headers, "/wmts"))
+            }
+            .unwrap_or_else(|| "http://127.0.0.1:3000/wmts".into());
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
@@ -4607,6 +4692,60 @@ fn sha256_hex(value: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_forwarded_prefixes() {
+        assert_eq!(
+            normalize_forwarded_prefix("/geoserver"),
+            Some("/geoserver".into())
+        );
+        assert_eq!(
+            normalize_forwarded_prefix(" /ib/geoserver/, /ignored "),
+            Some("/ib/geoserver".into())
+        );
+        assert_eq!(normalize_forwarded_prefix("/"), Some(String::new()));
+        assert_eq!(normalize_forwarded_prefix("geoserver"), None);
+        assert_eq!(normalize_forwarded_prefix("/geoserver//nested"), None);
+        assert_eq!(normalize_forwarded_prefix("/geoserver/../admin"), None);
+        assert_eq!(normalize_forwarded_prefix("/geoserver\""), None);
+    }
+
+    #[test]
+    fn rewrites_management_pages_for_forwarded_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-prefix",
+            axum::http::HeaderValue::from_static("/maps/geoserver"),
+        );
+        let Html(page) = management_page(
+            r#"<html><head></head><body><a href="/metrics">指标</a><script src="/assets/app.js"></script></body></html>"#,
+            &headers,
+        );
+        assert!(page.contains("href=\"/maps/geoserver/metrics\""));
+        assert!(page.contains("src=\"/maps/geoserver/assets/app.js\""));
+        assert!(page.contains("const prefix=\"/maps/geoserver\""));
+    }
+
+    #[test]
+    fn creates_public_service_url_from_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-prefix",
+            axum::http::HeaderValue::from_static("/geoserver"),
+        );
+        headers.insert(
+            "x-forwarded-host",
+            axum::http::HeaderValue::from_static("maps.example.test"),
+        );
+        headers.insert(
+            "x-forwarded-proto",
+            axum::http::HeaderValue::from_static("https"),
+        );
+        assert_eq!(
+            forwarded_service_url(&headers, "/wms").as_deref(),
+            Some("https://maps.example.test/geoserver/wms")
+        );
+    }
 
     #[test]
     fn converts_all_compiled_rules_to_ordered_render_rules() {

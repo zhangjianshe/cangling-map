@@ -1,4 +1,4 @@
-document.head.append(Object.assign(document.createElement("script"),{src:"/assets/service-frame.js"}));
+document.head.append(Object.assign(document.createElement("script"),{src:window.__canglingUrl("/assets/service-frame.js")}));
 const S={items:[],edit:null,del:null,q:"",page:1,pageSize:20,total:0,totalPages:1},$=q=>document.querySelector(q),E={loading:$("#loading"),error:$("#error"),empty:$("#empty"),list:$("#list"),rows:$("#rows"),cards:$("#cards"),none:$("#none"),summary:$("#summary"),search:$("#search"),editor:$("#editor"),form:$("#form"),formError:$("#form-error"),save:$("#save"),confirm:$("#confirm"),toast:$("#toast")};
 const esc=(v="")=>String(v).replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));
 async function api(url,opt={}){const r=await fetch(url,{headers:{"Content-Type":"application/json"},...opt});if(!r.ok){let b={};try{b=await r.json()}catch{}throw Error(b.error||`请求失败（${r.status}）`)}return r.status===204?null:r.json()}

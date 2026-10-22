@@ -1,4 +1,4 @@
-document.head.append(Object.assign(document.createElement("script"),{src:"/assets/service-frame.js"}));
+document.head.append(Object.assign(document.createElement("script"),{src:window.__canglingUrl("/assets/service-frame.js")}));
 const byId = id => document.getElementById(id);
 const integer = new Intl.NumberFormat('zh-CN');
 

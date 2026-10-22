@@ -50,6 +50,25 @@ curl 'http://127.0.0.1:3000/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.
 打开 `http://127.0.0.1:3000/` 进入指标首页，数据目录位于
 `http://127.0.0.1:3000/catalog`。
 
+## 反向代理子路径
+
+管理页面、静态资源、前端 API、WMS/WMTS 预览以及能力文档支持通过
+`X-Forwarded-Prefix` 动态识别外部路径前缀。Nginx 应删除前缀后再转发，并保留外部
+主机和协议：
+
+```nginx
+location ^~ /geoserver/ {
+    proxy_set_header X-Forwarded-Prefix /geoserver;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_pass http://cangling-map:3000/;
+}
+```
+
+`proxy_pass` 末尾的 `/` 不能省略，它负责把 `/geoserver/metrics` 转换成上游的
+`/metrics`。前缀可以改成任意合法子路径，无需重新编译；未设置
+`X-Forwarded-Prefix` 时继续使用根路径。
+
 ## 数据与缓存目录
 
 服务将持久化数据和可清理缓存分开保存：
