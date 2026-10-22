@@ -655,6 +655,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/wmts", get(wmts))
         .route("/{workspace}/wms", get(geoserver_workspace_wms))
         .route("/geoserver/{workspace}/wms", get(geoserver_workspace_wms))
+        .route(
+            "/ib/geoserver/{workspace}/wms",
+            get(geoserver_workspace_wms),
+        )
         .route("/api/catalog", get(list_catalog).post(create_catalog_item))
         .route("/api/host-files", axum::routing::post(list_host_files))
         .route("/api/catalog/{id}/features", get(preview_catalog_features))
