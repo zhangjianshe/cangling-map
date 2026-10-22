@@ -383,7 +383,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cangling-gdal-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "earcutr",
  "gdal",
@@ -1071,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "gpu-render-bench"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "map-catalog"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "map-core",
@@ -1652,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "map-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "map-gdal"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "map-gpu"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "map-render"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "image",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "map-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "axum",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "map-style"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "map-core",
  "quick-xml",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "ogc-wms"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "map-core",
  "serde",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "ogc-wmts"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "thiserror 2.0.21",
 ]
