@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fs,
     net::SocketAddr,
+    process::Command,
     str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -66,6 +68,7 @@ struct AppState {
     gpu_rasterizer: Option<Arc<FallbackVectorRasterizer>>,
     gpu_backend: Option<Arc<map_gdal::GpuVectorRasterizer>>,
     vector_render_backend: String,
+    hardware_sampler: Arc<StdMutex<HardwareSampler>>,
     render_limit: Arc<Semaphore>,
     tile_flights: Arc<StdMutex<HashMap<WmtsCacheKey, Weak<Mutex<()>>>>>,
     prepared_vector_sources: Arc<Mutex<HashSet<String>>>,
@@ -91,6 +94,41 @@ struct MetricsDetails {
     slow_requests: VecDeque<SlowTileRequest>,
     recent_wms_requests: VecDeque<WmsRequestSnapshot>,
     events: VecDeque<MetricEvent>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuTicks {
+    total: u64,
+    idle: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CpuIdentity {
+    model: String,
+    logical_cores: usize,
+    physical_cores: usize,
+}
+
+struct HardwareSampler {
+    cpu_identity: CpuIdentity,
+    previous_cpu: Option<CpuTicks>,
+    gpu_adapters: Option<Vec<GpuAdapterStatus>>,
+    gpu_telemetry: Vec<NvidiaGpuTelemetry>,
+    gpu_telemetry_error: Option<String>,
+    gpu_probed_at: Option<Instant>,
+}
+
+impl Default for HardwareSampler {
+    fn default() -> Self {
+        Self {
+            cpu_identity: read_cpu_identity(),
+            previous_cpu: read_cpu_ticks(),
+            gpu_adapters: None,
+            gpu_telemetry: Vec::new(),
+            gpu_telemetry_error: None,
+            gpu_probed_at: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -606,6 +644,7 @@ async fn main() -> anyhow::Result<()> {
         gpu_rasterizer,
         gpu_backend,
         vector_render_backend,
+        hardware_sampler: Arc::new(StdMutex::new(HardwareSampler::default())),
         render_limit: Arc::new(Semaphore::new(render_concurrency)),
         tile_flights: Arc::new(StdMutex::new(HashMap::new())),
         prepared_vector_sources: Arc::new(Mutex::new(HashSet::new())),
@@ -1007,8 +1046,10 @@ struct MetricsSnapshot {
     render_concurrency_available: usize,
     active_tile_requests: usize,
     projection_cache_budget_mb: u64,
+    render_mode: String,
     vector_render_backend: String,
     gpu_renderer: Option<GpuRendererStatus>,
+    hardware: HardwareStatus,
     cache_backend: CacheBackendStatus,
     layers: Vec<LayerMetricsSnapshot>,
     slow_requests: Vec<SlowTileRequest>,
@@ -1019,6 +1060,9 @@ struct MetricsSnapshot {
 
 #[derive(Serialize)]
 struct GpuRendererStatus {
+    adapter_name: String,
+    adapter_backend: String,
+    adapter_device_type: String,
     primary_attempts: u64,
     primary_successes: u64,
     fallback_requests: u64,
@@ -1033,6 +1077,57 @@ struct GpuRendererStatus {
     mesh_disk_misses: u64,
     mesh_disk_writes: u64,
     mesh_disk_errors: u64,
+}
+
+#[derive(Serialize)]
+struct HardwareStatus {
+    cpu: CpuStatus,
+    memory: MemoryStatus,
+    gpu_adapters: Vec<GpuAdapterStatus>,
+    gpu_telemetry_error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CpuStatus {
+    model: String,
+    logical_cores: usize,
+    physical_cores: usize,
+    utilization_percent: Option<f64>,
+    load_average_1m: Option<f64>,
+    load_average_5m: Option<f64>,
+    load_average_15m: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct MemoryStatus {
+    total_bytes: u64,
+    used_bytes: u64,
+    available_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct GpuAdapterStatus {
+    name: String,
+    backend: String,
+    device_type: String,
+    selected: bool,
+    driver_version: Option<String>,
+    memory_total_bytes: Option<u64>,
+    memory_used_bytes: Option<u64>,
+    utilization_percent: Option<f64>,
+    temperature_celsius: Option<f64>,
+    power_watts: Option<f64>,
+}
+
+#[derive(Clone)]
+struct NvidiaGpuTelemetry {
+    name: String,
+    driver_version: String,
+    memory_total_bytes: Option<u64>,
+    memory_used_bytes: Option<u64>,
+    utilization_percent: Option<f64>,
+    temperature_celsius: Option<f64>,
+    power_watts: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -1068,6 +1163,259 @@ struct MetricSeriesPoint {
     average_duration_ms: f64,
 }
 
+impl HardwareSampler {
+    fn snapshot(&mut self, selected_gpu: Option<&str>) -> HardwareStatus {
+        let utilization_percent = read_cpu_ticks().and_then(|current| {
+            let previous = self.previous_cpu.replace(current)?;
+            let total = current.total.saturating_sub(previous.total);
+            let idle = current.idle.saturating_sub(previous.idle);
+            (total > 0).then(|| 100.0 * total.saturating_sub(idle) as f64 / total as f64)
+        });
+        let (load_average_1m, load_average_5m, load_average_15m) = read_load_average();
+        if self.gpu_adapters.is_none() {
+            self.gpu_adapters = Some(
+                map_gdal::GpuVectorRasterizer::available_adapters()
+                    .into_iter()
+                    .map(|adapter| GpuAdapterStatus {
+                        name: adapter.name,
+                        backend: adapter.backend,
+                        device_type: adapter.device_type,
+                        selected: false,
+                        driver_version: None,
+                        memory_total_bytes: None,
+                        memory_used_bytes: None,
+                        utilization_percent: None,
+                        temperature_celsius: None,
+                        power_watts: None,
+                    })
+                    .collect(),
+            );
+        }
+        if self
+            .gpu_probed_at
+            .map_or(true, |probed| probed.elapsed().as_secs() >= 4)
+        {
+            match probe_nvidia_gpus() {
+                Ok(telemetry) => {
+                    self.gpu_telemetry = telemetry;
+                    self.gpu_telemetry_error = None;
+                }
+                Err(error) => {
+                    self.gpu_telemetry.clear();
+                    self.gpu_telemetry_error = Some(error);
+                }
+            }
+            self.gpu_probed_at = Some(Instant::now());
+        }
+        let mut gpu_adapters = self.gpu_adapters.clone().unwrap_or_default();
+        for adapter in &mut gpu_adapters {
+            adapter.selected = selected_gpu.is_some_and(|name| name == adapter.name);
+            if let Some(telemetry) = self
+                .gpu_telemetry
+                .iter()
+                .find(|telemetry| gpu_names_match(&adapter.name, &telemetry.name))
+            {
+                apply_gpu_telemetry(adapter, telemetry);
+            }
+        }
+        for telemetry in &self.gpu_telemetry {
+            if gpu_adapters
+                .iter()
+                .any(|adapter| gpu_names_match(&adapter.name, &telemetry.name))
+            {
+                continue;
+            }
+            let mut adapter = GpuAdapterStatus {
+                name: telemetry.name.clone(),
+                backend: "NVIDIA".into(),
+                device_type: "DiscreteGpu".into(),
+                selected: selected_gpu.is_some_and(|name| gpu_names_match(name, &telemetry.name)),
+                driver_version: None,
+                memory_total_bytes: None,
+                memory_used_bytes: None,
+                utilization_percent: None,
+                temperature_celsius: None,
+                power_watts: None,
+            };
+            apply_gpu_telemetry(&mut adapter, telemetry);
+            gpu_adapters.push(adapter);
+        }
+        HardwareStatus {
+            cpu: CpuStatus {
+                model: self.cpu_identity.model.clone(),
+                logical_cores: self.cpu_identity.logical_cores,
+                physical_cores: self.cpu_identity.physical_cores,
+                utilization_percent,
+                load_average_1m,
+                load_average_5m,
+                load_average_15m,
+            },
+            memory: read_memory_status(),
+            gpu_adapters,
+            gpu_telemetry_error: self.gpu_telemetry_error.clone(),
+        }
+    }
+}
+
+fn read_cpu_identity() -> CpuIdentity {
+    let logical_cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let contents = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let model = contents
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            matches!(key.trim(), "model name" | "Hardware").then(|| value.trim().to_owned())
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| std::env::consts::ARCH.to_owned());
+    let mut physical_ids = HashSet::new();
+    for processor in contents.split("\n\n") {
+        let mut physical_id = None;
+        let mut core_id = None;
+        for line in processor.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            match key.trim() {
+                "physical id" => physical_id = Some(value.trim()),
+                "core id" => core_id = Some(value.trim()),
+                _ => {}
+            }
+        }
+        if let (Some(physical_id), Some(core_id)) = (physical_id, core_id) {
+            physical_ids.insert((physical_id.to_owned(), core_id.to_owned()));
+        }
+    }
+    CpuIdentity {
+        model,
+        logical_cores,
+        physical_cores: if physical_ids.is_empty() {
+            logical_cores
+        } else {
+            physical_ids.len()
+        },
+    }
+}
+
+fn read_cpu_ticks() -> Option<CpuTicks> {
+    let contents = fs::read_to_string("/proc/stat").ok()?;
+    let line = contents.lines().next()?;
+    let values = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|value| value.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if values.len() < 4 {
+        return None;
+    }
+    Some(CpuTicks {
+        total: values.iter().sum(),
+        idle: values[3].saturating_add(values.get(4).copied().unwrap_or_default()),
+    })
+}
+
+fn read_load_average() -> (Option<f64>, Option<f64>, Option<f64>) {
+    let values = fs::read_to_string("/proc/loadavg")
+        .ok()
+        .map(|contents| {
+            contents
+                .split_whitespace()
+                .take(3)
+                .filter_map(|value| value.parse::<f64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    (
+        values.first().copied(),
+        values.get(1).copied(),
+        values.get(2).copied(),
+    )
+}
+
+fn read_memory_status() -> MemoryStatus {
+    let contents = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total_bytes = 0;
+    let mut available_bytes = 0;
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let bytes = value
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default()
+            .saturating_mul(1024);
+        match key {
+            "MemTotal" => total_bytes = bytes,
+            "MemAvailable" => available_bytes = bytes,
+            _ => {}
+        }
+    }
+    MemoryStatus {
+        total_bytes,
+        used_bytes: total_bytes.saturating_sub(available_bytes),
+        available_bytes,
+    }
+}
+
+fn probe_nvidia_gpus() -> Result<Vec<NvidiaGpuTelemetry>, String> {
+    let output = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .map_err(|error| format!("NVIDIA 遥测不可用：{error}"))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            "NVIDIA 遥测命令执行失败".into()
+        } else {
+            message
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(|line| {
+            let values = line.split(',').map(str::trim).collect::<Vec<_>>();
+            (values.len() >= 7).then(|| NvidiaGpuTelemetry {
+                name: values[0].to_owned(),
+                driver_version: values[1].to_owned(),
+                memory_total_bytes: parse_optional_f64(values[2])
+                    .map(|value| (value * 1024.0 * 1024.0) as u64),
+                memory_used_bytes: parse_optional_f64(values[3])
+                    .map(|value| (value * 1024.0 * 1024.0) as u64),
+                utilization_percent: parse_optional_f64(values[4]),
+                temperature_celsius: parse_optional_f64(values[5]),
+                power_watts: parse_optional_f64(values[6]),
+            })
+        })
+        .collect())
+}
+
+fn parse_optional_f64(value: &str) -> Option<f64> {
+    value.parse::<f64>().ok()
+}
+
+fn gpu_names_match(left: &str, right: &str) -> bool {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    left.contains(&right) || right.contains(&left)
+}
+
+fn apply_gpu_telemetry(adapter: &mut GpuAdapterStatus, telemetry: &NvidiaGpuTelemetry) {
+    adapter.driver_version = Some(telemetry.driver_version.clone());
+    adapter.memory_total_bytes = telemetry.memory_total_bytes;
+    adapter.memory_used_bytes = telemetry.memory_used_bytes;
+    adapter.utilization_percent = telemetry.utilization_percent;
+    adapter.temperature_celsius = telemetry.temperature_celsius;
+    adapter.power_watts = telemetry.power_watts;
+}
+
 async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot> {
     let rendered_tiles = state.metrics.rendered_tiles.load(Ordering::Relaxed);
     let render_time = state.metrics.render_time_micros.load(Ordering::Relaxed);
@@ -1096,7 +1444,17 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
     let slow_requests = details.slow_requests.iter().cloned().collect();
     let recent_wms_requests = details.recent_wms_requests.iter().cloned().collect();
     let series = metric_series(&details.events);
+    drop(details);
     let cache_backend = active_wmts_cache(&state).status();
+    let selected_gpu = state
+        .gpu_backend
+        .as_ref()
+        .map(|gpu| gpu.adapter_info().name.as_str());
+    let hardware = state
+        .hardware_sampler
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .snapshot(selected_gpu);
     Json(MetricsSnapshot {
         uptime_seconds: state.metrics.started.elapsed().as_secs(),
         wmts_requests: state.metrics.wmts_requests.load(Ordering::Relaxed),
@@ -1113,6 +1471,9 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(2048),
+        render_mode: std::env::var("MAP_RENDER_BACKEND")
+            .unwrap_or_else(|_| "cpu".into())
+            .to_ascii_lowercase(),
         vector_render_backend: state.vector_render_backend.clone(),
         gpu_renderer: state.gpu_backend.as_ref().map(|gpu| {
             let fallback = state
@@ -1121,7 +1482,11 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
                 .map(|renderer| renderer.stats())
                 .unwrap_or_else(FallbackRasterizerStats::default);
             let cache = gpu.scene_cache_stats();
+            let adapter = gpu.adapter_info();
             GpuRendererStatus {
+                adapter_name: adapter.name.clone(),
+                adapter_backend: adapter.backend.clone(),
+                adapter_device_type: adapter.device_type.clone(),
                 primary_attempts: fallback.primary_attempts,
                 primary_successes: fallback.primary_successes,
                 fallback_requests: fallback.fallback_requests,
@@ -1138,6 +1503,7 @@ async fn metrics_snapshot(State(state): State<AppState>) -> Json<MetricsSnapshot
                 mesh_disk_errors: cache.mesh_disk_errors,
             }
         }),
+        hardware,
         cache_backend,
         layers,
         slow_requests,

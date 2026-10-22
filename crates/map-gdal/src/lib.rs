@@ -198,6 +198,10 @@ pub struct GpuSceneCacheStats {
 }
 
 impl GpuVectorRasterizer {
+    pub fn available_adapters() -> Vec<map_gpu::AdapterInfo> {
+        map_gpu::available_adapters()
+    }
+
     pub fn new(adapter_name: Option<String>) -> Result<Self, RasterizeError> {
         let scene_cache_mb = std::env::var("MAP_GPU_SCENE_CACHE_MB")
             .ok()

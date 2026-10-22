@@ -9,6 +9,14 @@
   <article class="metric-card"><span>合并请求</span><strong id="coalesced">—</strong><small>避免重复渲染的请求</small></article>
   <article class="metric-card metric-cache-backend"><span>缓存后端</span><strong id="cache-backend">—</strong><small id="cache-backend-detail">正在获取状态…</small></article>
 </section>
+<section class="panel metrics-device-panel"><div class="metrics-section-head"><div><h2>渲染设备</h2><p>当前渲染顺序、CPU 负载和可用 GPU 适配器。</p></div><span id="renderer-health" class="renderer-health">正在检测…</span></div>
+<div class="device-summary-grid">
+  <article><span>渲染顺序</span><strong id="render-mode">—</strong><small id="render-backend">正在获取实际后端…</small><div id="render-flow" class="render-flow"></div></article>
+  <article><span>CPU</span><strong id="cpu-usage">—</strong><small id="cpu-model">正在读取处理器信息…</small><div id="cpu-detail" class="device-meta"></div></article>
+  <article><span>系统内存</span><strong id="memory-usage">—</strong><small id="memory-detail">正在读取内存信息…</small><progress id="memory-progress" max="100" value="0"></progress></article>
+</div>
+<div class="gpu-device-wrap"><div class="gpu-device-title"><div><h3>GPU 适配器</h3><p id="gpu-probe-note">枚举 Vulkan、Metal、DX12 或软件适配器；NVIDIA 设备同时读取实时遥测。</p></div><small id="gpu-request-stats"></small></div><div class="metrics-table-wrap"><table class="gpu-device-table"><thead><tr><th>设备</th><th>后端 / 类型</th><th>状态</th><th>显存</th><th>利用率</th><th>温度 / 功耗</th><th>驱动</th></tr></thead><tbody id="gpu-adapters"><tr><td colspan="7" class="metrics-empty">正在枚举 GPU…</td></tr></tbody></table></div></div>
+</section>
 <section class="panel metrics-panel"><div class="metrics-section-head"><div><h2>渲染性能</h2><p>从本次服务启动开始累计的进程内指标。</p></div><span class="live-badge"><i></i>每 5 秒刷新</span></div><div class="metrics-detail-grid">
   <div><span>平均渲染耗时</span><strong id="render-ms">—</strong><small>数据查询、样式匹配与 PNG 编码</small></div>
   <div><span>平均缓存写入</span><strong id="cache-write-ms">—</strong><small>写入当前 WMTS 缓存后端</small></div>

@@ -29,6 +29,7 @@ function render(data) {
   byId('active-requests').textContent = integer.format(data.active_tile_requests);
   byId('available-concurrency').textContent = integer.format(data.render_concurrency_available);
   byId('projection-budget').textContent = `${integer.format(data.projection_cache_budget_mb)} MB`;
+  renderHardware(data);
   renderLayers(data.layers);
   renderSlowRequests(data.slow_requests);
   renderSeries(data.series);
@@ -40,6 +41,74 @@ const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({'&':'&am
 const milliseconds = value => `${Number(value).toFixed(2)} ms`;
 const percent = value => `${(Number(value) * 100).toFixed(1)}%`;
 const bytes = value => value >= 1048576 ? `${(value / 1048576).toFixed(1)} MB` : value >= 1024 ? `${(value / 1024).toFixed(1)} KB` : `${value} B`;
+
+function renderHardware(data) {
+  const hardware = data.hardware || {};
+  const cpu = hardware.cpu || {};
+  const memory = hardware.memory || {};
+  const gpu = data.gpu_renderer;
+  const mode = String(data.render_mode || 'cpu').toLowerCase();
+  const backend = String(data.vector_render_backend || mode);
+  const gpuActive = Boolean(gpu) && !gpu.primary_disabled;
+  const cpuActive = mode === 'cpu' || backend.includes('cpu fallback') || Boolean(gpu?.primary_disabled);
+  byId('render-mode').textContent = mode === 'auto' ? 'AUTO · GPU → CPU' : mode.toUpperCase();
+  byId('render-backend').textContent = `实际后端：${backend}`;
+  byId('render-flow').innerHTML = mode === 'auto'
+    ? `<b class="${gpuActive ? 'active' : ''}">GPU</b><i>→</i><b class="${cpuActive ? 'active' : ''}">CPU</b>`
+    : `<b class="active">${mode === 'gpu' ? 'GPU' : 'CPU'}</b>`;
+
+  const health = byId('renderer-health');
+  if (gpu?.primary_disabled || backend.includes('cpu fallback')) {
+    health.textContent = 'GPU 已降级';
+    health.className = 'renderer-health warn';
+  } else if (mode === 'gpu' && !gpu) {
+    health.textContent = 'GPU 不可用';
+    health.className = 'renderer-health danger';
+  } else {
+    health.textContent = gpuActive ? 'GPU 正常' : 'CPU 正常';
+    health.className = 'renderer-health good';
+  }
+
+  const cpuUsage = cpu.utilization_percent;
+  byId('cpu-usage').textContent = cpuUsage == null ? '采样中…' : `${Number(cpuUsage).toFixed(1)}%`;
+  byId('cpu-model').textContent = cpu.model || '未知处理器';
+  const load = [cpu.load_average_1m, cpu.load_average_5m, cpu.load_average_15m]
+    .map(value => value == null ? '—' : Number(value).toFixed(2)).join(' / ');
+  byId('cpu-detail').textContent = `${integer.format(cpu.physical_cores || 0)} 核 · ${integer.format(cpu.logical_cores || 0)} 线程 · 负载 ${load}`;
+
+  const totalMemory = Number(memory.total_bytes || 0);
+  const usedMemory = Number(memory.used_bytes || 0);
+  const memoryPercent = totalMemory ? usedMemory / totalMemory * 100 : 0;
+  byId('memory-usage').textContent = `${memoryPercent.toFixed(1)}%`;
+  byId('memory-detail').textContent = `${bytes(usedMemory)} / ${bytes(totalMemory)} · 可用 ${bytes(Number(memory.available_bytes || 0))}`;
+  byId('memory-progress').value = memoryPercent;
+
+  byId('gpu-request-stats').textContent = gpu
+    ? `GPU 成功 ${integer.format(gpu.primary_successes)} · 降级 ${integer.format(gpu.fallback_requests)} · 失败 ${integer.format(gpu.primary_failures)}`
+    : '当前未启用 GPU 渲染';
+  const probeNote = byId('gpu-probe-note');
+  probeNote.textContent = hardware.gpu_telemetry_error
+    ? `适配器枚举正常；实时遥测不可用：${hardware.gpu_telemetry_error}`
+    : '枚举图形适配器，并读取 NVIDIA 显存、利用率、温度和功耗。';
+  renderGpuAdapters(hardware.gpu_adapters || []);
+}
+
+function renderGpuAdapters(adapters) {
+  const body = byId('gpu-adapters');
+  if (!adapters.length) {
+    body.innerHTML = '<tr><td colspan="7" class="metrics-empty">未发现可用 GPU 适配器</td></tr>';
+    return;
+  }
+  body.innerHTML = adapters.map(adapter => {
+    const used = adapter.memory_used_bytes;
+    const total = adapter.memory_total_bytes;
+    const memory = used == null || total == null ? '—' : `${bytes(used)} / ${bytes(total)}`;
+    const utilization = adapter.utilization_percent == null ? null : Number(adapter.utilization_percent);
+    const temperature = adapter.temperature_celsius == null ? '—' : `${Number(adapter.temperature_celsius).toFixed(0)} °C`;
+    const power = adapter.power_watts == null ? '—' : `${Number(adapter.power_watts).toFixed(1)} W`;
+    return `<tr><td><div class="gpu-device-name"><i class="${adapter.selected ? 'selected' : ''}"></i><span><b>${escapeHtml(adapter.name)}</b><small>${adapter.selected ? '当前渲染设备' : '可用适配器'}</small></span></div></td><td>${escapeHtml(adapter.backend)}<small>${escapeHtml(adapter.device_type)}</small></td><td><span class="gpu-status-pill ${adapter.selected ? 'active' : ''}">${adapter.selected ? '使用中' : '待命'}</span></td><td>${memory}</td><td>${utilization == null ? '—' : `<div class="gpu-usage"><span>${utilization.toFixed(1)}%</span><progress max="100" value="${utilization}"></progress></div>`}</td><td>${temperature}<small>${power}</small></td><td>${escapeHtml(adapter.driver_version || '—')}</td></tr>`;
+  }).join('');
+}
 
 function renderLayers(layers) {
   const body = byId('layer-metrics');

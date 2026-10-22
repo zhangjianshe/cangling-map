@@ -93,6 +93,24 @@ pub struct AdapterInfo {
     pub device_type: String,
 }
 
+pub fn available_adapters() -> Vec<AdapterInfo> {
+    let instance = wgpu::Instance::default();
+    let mut adapters = instance
+        .enumerate_adapters(wgpu::Backends::all())
+        .into_iter()
+        .map(|adapter| {
+            let info = adapter.get_info();
+            AdapterInfo {
+                name: info.name,
+                backend: format!("{:?}", info.backend),
+                device_type: format!("{:?}", info.device_type),
+            }
+        })
+        .collect::<Vec<_>>();
+    adapters.sort_by(|left, right| left.name.cmp(&right.name));
+    adapters
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PreparedSceneStats {
     pub chunks: usize,
