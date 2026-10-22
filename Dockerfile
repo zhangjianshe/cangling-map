@@ -1,12 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GDAL_BASE_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.13.0
+ARG GDAL_BASE_IMAGE=mapway/gdal-base:v4.2.35
 ARG RUST_IMAGE=rust:1.88.0-bookworm
 
 FROM ${RUST_IMAGE} AS rust-toolchain
 
 FROM ${GDAL_BASE_IMAGE} AS builder
-RUN apt-get update \
+ENV http_proxy= \
+    https_proxy= \
+    HTTP_PROXY= \
+    HTTPS_PROXY=
+RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates clang git libclang-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -24,11 +29,17 @@ WORKDIR /workspace/cangling-map
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/workspace/cangling-map/target \
-    cargo build --release --locked --bin map-server \
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
+    && cargo build --release --locked --bin map-server \
     && cp target/release/map-server /usr/local/bin/cangling-map
 
 FROM ${GDAL_BASE_IMAGE}
-RUN apt-get update \
+ENV http_proxy= \
+    https_proxy= \
+    HTTP_PROXY= \
+    HTTPS_PROXY=
+RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         fontconfig fonts-noto-cjk libvulkan1 \
     && test -r /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \

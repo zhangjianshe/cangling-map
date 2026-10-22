@@ -2,8 +2,13 @@
 .github
 target
 catalog.db
-wmts-cache
-vector-projection-cache
+catalog.db.*
+data
+cache
+backups
+wmts-cache*
+vector-projection-cache*
+.idea
 dist
 *.tar
 *.tar.gz
