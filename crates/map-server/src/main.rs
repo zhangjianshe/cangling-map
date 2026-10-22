@@ -2682,15 +2682,19 @@ async fn geoserver_workspace_wms(
         .iter_mut()
         .find(|(key, _)| key.eq_ignore_ascii_case("LAYERS"))
     {
-        let prefix = format!("{workspace}:");
-        if let Some(layer) = layers.strip_prefix(&prefix) {
-            *layers = layer.to_owned();
-        }
+        *layers = normalize_wms_layer_name(layers, Some(&workspace));
     }
     wms(State(state), Query(parameters)).await
 }
 
-async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> Response {
+async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>) -> Response {
+    // GeoServer accepts both a workspace-local layer name (`china`) and a
+    // qualified name (`ai:china`). Nginx deployments may strip the workspace
+    // path before forwarding to `/wms`, so normalize the qualified form here
+    // for both tiled and ordinary WMS requests.
+    if let Some(layers) = parameters.get_mut("LAYERS") {
+        *layers = normalize_wms_layer_name(layers, None);
+    }
     // GeoServer clients commonly use tiled WMS (256px, EPSG:3857, aligned
     // BBOX) instead of issuing WMTS GetTile directly. Translate that request
     // to the native WMTS path so it shares cache keys, request coalescing and
@@ -3070,6 +3074,20 @@ async fn serve_wms_map(state: AppState, parameters: HashMap<String, String>) -> 
             &error.to_string(),
         ),
     }
+}
+
+fn normalize_wms_layer_name(layers: &str, workspace: Option<&str>) -> String {
+    if layers.contains(',') {
+        return layers.to_owned();
+    }
+    if let Some(workspace) = workspace {
+        if let Some(layer) = layers.strip_prefix(&format!("{workspace}:")) {
+            return layer.to_owned();
+        }
+    }
+    layers
+        .rsplit_once(':')
+        .map_or_else(|| layers.to_owned(), |(_, layer)| layer.to_owned())
 }
 
 fn tiled_wms_tile_request(parameters: &HashMap<String, String>) -> Option<TileRequest> {
@@ -4344,6 +4362,13 @@ mod tests {
         ]);
 
         assert!(tiled_wms_tile_request(&parameters).is_none());
+    }
+
+    #[test]
+    fn normalizes_a_geoserver_qualified_layer_name() {
+        assert_eq!(normalize_wms_layer_name("ai:china", None), "china");
+        assert_eq!(normalize_wms_layer_name("ai:china", Some("ai")), "china");
+        assert_eq!(normalize_wms_layer_name("china", None), "china");
     }
 
     #[test]
