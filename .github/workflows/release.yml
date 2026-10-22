@@ -12,26 +12,44 @@ permissions:
   contents: read
 
 jobs:
-  docker:
-    name: publish multi-arch image
-    runs-on: ubuntu-latest
+  metadata:
+    name: read release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout cangling-map
         uses: actions/checkout@v5
-        with:
-          path: cangling-map
 
       - name: Read release metadata
         id: meta
-        working-directory: cangling-map
         shell: bash
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
           test -n "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
+  build:
+    name: build ${{ matrix.arch }} image
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout cangling-map
+        uses: actions/checkout@v5
+
+      - name: Set up native Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Cangling registry
         uses: docker/login-action@v4
@@ -40,23 +58,55 @@ jobs:
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
-      - name: Build and publish amd64 + arm64
+      - name: Build and publish ${{ matrix.arch }}
         uses: docker/build-push-action@v7
         with:
-          context: cangling-map
-          file: cangling-map/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ needs.metadata.outputs.version }}-${{ matrix.arch }}
+            ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.title=cangling-map
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha,scope=cangling-map-image
-          cache-to: type=gha,mode=max,scope=cangling-map-image
+          cache-from: type=gha,scope=cangling-map-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cangling-map-${{ matrix.arch }}
           provenance: mode=max
           sbom: true
+
+  manifest:
+    name: publish multi-arch manifest
+    needs: [metadata, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to Cangling registry
+        uses: docker/login-action@v4
+        with:
+          registry: harbor.cangling.cn:22002
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Create and publish manifests
+        shell: bash
+        run: |
+          sources=(
+            "${IMAGE}:${{ needs.metadata.outputs.version }}-amd64"
+            "${IMAGE}:${{ needs.metadata.outputs.version }}-arm64"
+          )
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${{ needs.metadata.outputs.version }}" \
+            --tag "${IMAGE}:${GITHUB_SHA}" \
+            --tag "${IMAGE}:latest" \
+            "${sources[@]}"
+
+      - name: Verify multi-arch image
+        shell: bash
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.version }}"
