@@ -29,7 +29,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM ${GDAL_BASE_IMAGE}
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libvulkan1 \
+    && apt-get install -y --no-install-recommends \
+        fontconfig fonts-noto-cjk libvulkan1 \
+    && test -r /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 cangling \
     && useradd --system --uid 10001 --gid cangling --home-dir /data --create-home cangling \
@@ -42,6 +45,7 @@ ENV MAP_SERVER_ADDRESS=0.0.0.0:3000 \
     CATALOG_DATABASE_URL=sqlite:///data/catalog.db?mode=rwc \
     WMTS_CACHE_BACKEND=filesystem \
     MAP_CACHE_ROOT=/cache \
+    MAP_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
     STYLE_ASSET_ROOT=/data/style-assets
 VOLUME ["/data", "/cache"]
 EXPOSE 3000

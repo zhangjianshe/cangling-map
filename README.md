@@ -61,6 +61,7 @@ curl 'http://127.0.0.1:3000/wms?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=1.3.
 | 本地缓存根目录 | `/cache` | `MAP_CACHE_ROOT` |
 | WMTS 瓦片缓存 | `/cache/wmts` | `WMTS_CACHE_PATH` |
 | 矢量预投影缓存 | `/cache/vector-projection` | `VECTOR_PROJECTION_CACHE_PATH` |
+| 中文标注字体 | `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` | `MAP_FONT_PATH` |
 | GPU 就绪网格缓存 | `/cache/gpu-mesh` | `MAP_GPU_MESH_CACHE_PATH` |
 
 `WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH` 和 `MAP_GPU_MESH_CACHE_PATH` 是可选的
