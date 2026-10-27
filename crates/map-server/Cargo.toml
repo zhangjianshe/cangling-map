@@ -14,6 +14,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 image.workspace = true
+gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
 map-catalog = { path = "../map-catalog" }
 map-core = { path = "../map-core" }
 map-gdal = { path = "../map-gdal" }

@@ -1708,6 +1708,7 @@ dependencies = [
  "axum",
  "bytes",
  "cangling-gdal-core",
+ "gdal",
  "http-body-util",
  "hyper",
  "hyper-util",

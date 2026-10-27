@@ -82,11 +82,55 @@ location ^~ /geoserver/ {
 | 矢量预投影缓存 | `/cache/vector-projection` | `VECTOR_PROJECTION_CACHE_PATH` |
 | 中文标注字体 | `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` | `MAP_FONT_PATH` |
 | GPU 就绪网格缓存 | `/cache/gpu-mesh` | `MAP_GPU_MESH_CACHE_PATH` |
+| DEM 原始文件 | `/data/dem` | `DEM_DATA_ROOT` |
+| DEM Terrarium 瓦片缓存 | `/cache/terrain` | `DEM_CACHE_PATH` |
 
 `WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH` 和 `MAP_GPU_MESH_CACHE_PATH` 是可选的
 细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
 `MAP_CACHE_ROOT/vector-projection` 和 `MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
 `MAP_CACHE_ROOT` 默认为当前目录下的 `cache`。
+
+## DEM 高程瓦片
+
+管理页面位于 `/terrain`，可选择数据集、分页查看源文件、上传单波段 GeoTIFF，
+显示当前版本的可复制 XYZ 瓦片地址，然后点击“导入并构建元数据”发布或重新构建。
+上传文件不会立即改变已发布的瓦片；
+重新导入后客户端通过元数据接口获得新的版本化瓦片地址。
+
+将同一数据集的一组单波段高程 GeoTIFF 放在
+`$DEM_DATA_ROOT/<dataset-id>/source/`。导入只读取该目录下一层的 `.tif`、`.tiff`；
+发布中的源文件视为不可变，替换文件后须重新导入。源数据和生成的瓦片缓存分别位于
+`/data/dem` 与 `/cache/terrain`，清理缓存不会删除原始 DEM。
+
+导入会检查坐标系、地理范围、波段数、高程单位及像元缩放系数，并将每个文件的
+EPSG:3857 覆盖范围写入 SQLite R-tree 索引。请求瓦片时，服务先按发布版本读缓存；
+未命中才检索相交文件，用 GDAL 重投影并以双线性方式采样数值高程，最后编码为
+256×256 Terrarium RGB PNG。无覆盖的瓦片编码为全 NoData 黑色瓦片，也会被缓存。
+重叠文件按 `priorities` 中的数值优先级排序，优先级相同时选较高分辨率；
+空洞由其他文件补齐。例如导入 JSON 可包含
+`"priorities":{"local_high_res.tif":10}`。
+
+```bash
+# 例：/data/dem/sichuan/source/ 下已有 GeoTIFF
+curl -X POST http://127.0.0.1:3000/api/terrain/sichuan/import \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Sichuan DEM","vertical_datum":"EGM96","unit":"metre","max_zoom":18,"prepare_cog":true}'
+curl http://127.0.0.1:3000/api/terrain/sichuan/metadata
+```
+
+元数据响应包含当前 `revision`、`tileUrl`、覆盖范围、垂直基准和缩放范围。客户端应使用
+`tileUrl` 中的版本化地址请求瓦片；每次重新导入会生成新版本，旧浏览器缓存不会被复用。
+`vertical_datum` 仅声明源数据基准，目前**不执行垂直基准转换**；混合数据集的各文件
+须先在导入前统一高程基准。该字段应来自数据提供方的说明，表示像元高程值所参照的
+高程参考面，如 EGM96（EPSG:5773）、1985 国家高程基准或 WGS84 椭球高。
+EPSG:4326 是水平坐标参考系，不能据此推断高程基准；来源不明时填写“未知（待核实）”。
+设置 `prepare_cog:true` 时，导入会在
+`$DEM_DATA_ROOT/<dataset-id>/optimized/<revision>/` 生成带数值平均概览图的 COG
+副本，并以副本作为发布源；原始文件不会被改写。省略该选项时直接发布源文件，
+适合已经制作为 COG 的数据。旧版本的 COG 与瓦片缓存可在确认不再使用后清理。
+上传 API 为 `PUT /api/terrain/<dataset-id>/files/<filename.tif>`，请求体是原始文件字节；
+文件列表 API 为 `GET /api/terrain/<dataset-id>/files?page=1&page_size=20`。
+上传使用流式写盘，默认单文件上限 8 GiB，可用 `DEM_UPLOAD_MAX_BYTES` 调整。
 
 例如将缓存放到另一块磁盘：
 

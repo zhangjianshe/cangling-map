@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DEM 服务 · Cangling Map</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/terrain.css">
+</head>
+<body>
+<aside>
+  <a class="brand" href="/"><i>◇</i><span><b>Cangling</b><small>地图服务</small><small class="build-summary">v{{MAP_VERSION}} · {{MAP_BUILD_DATE}}</small></span></a>
+  <nav><label>数据</label><a href="/catalog">▦ 数据目录</a><a href="/styles">◒ 样式管理</a><a href="/style-assets">▧ 图片资源</a><label>发布配置</label><a href="/published-layers">◫ 发布图层</a><a href="/layer-groups">⊞ 图层组</a><label>设置</label><a href="/settings/cache">⚙ 缓存服务</a><label>服务</label><a class="active" href="/terrain">▤ DEM 服务</a><a href="/metrics">⌁ 指标</a><a href="/wms?SERVICE=WMS&amp;REQUEST=GetCapabilities&amp;VERSION=1.3.0">◎ WMS 服务</a><a href="/wmts?SERVICE=WMTS&amp;REQUEST=GetCapabilities&amp;VERSION=1.0.0">▦ WMTS 服务</a></nav>
+  <footer><em></em><span><b>服务运行中</b><small>SQLite 目录库</small></span></footer>
+</aside>
+<main>
+  <header><div><label>高程数据</label><h1>DEM 服务</h1><p>上传原始 GeoTIFF，检查发布目录，并按需生成高程瓦片。</p></div><div class="dem-header-actions"><button id="upload-open" class="primary" type="button">＋ 上传 DEM</button><button id="import-open" type="button">导入并构建元数据</button></div></header>
+  <section class="panel dem-dataset-panel">
+    <div class="dem-selector"><label for="dataset-id">数据集 ID</label><input id="dataset-id" list="dataset-options" spellcheck="false" placeholder="例如 sichuan"><datalist id="dataset-options"></datalist><button id="dataset-load" type="button">打开目录</button></div>
+    <div class="dem-summary"><span id="directory">选择数据集后显示源文件目录</span><span id="publication">尚未加载发布状态</span></div>
+    <div id="tile-access" class="dem-tile-access hidden"><div class="dem-tile-head"><div><b>DEM 瓦片访问地址</b><small>XYZ · Terrarium PNG · 256 × 256</small></div><a id="metadata-link" href="#" target="_blank" rel="noopener">查看元数据</a></div><div class="dem-tile-url"><input id="tile-url" type="text" readonly aria-label="DEM 瓦片访问地址"><button id="copy-tile-url" type="button">复制地址</button></div><p>将 {z}、{x}、{y} 替换为瓦片坐标；重新导入后请使用新地址。</p></div>
+  </section>
+  <section class="panel dem-files-panel">
+    <div class="dem-panel-head"><div><h2>原始 DEM 文件</h2><p>上传的文件先保存在 source 目录；导入后才参与瓦片生成。</p></div><span id="file-count">—</span></div>
+    <div id="file-error" class="form-error hidden"></div>
+    <div class="dem-table-wrap"><table><thead><tr><th>文件名</th><th>文件大小</th><th>修改时间</th></tr></thead><tbody id="file-rows"><tr><td colspan="3" class="dem-empty">正在读取目录…</td></tr></tbody></table></div>
+    <div class="dem-pagination"><span id="page-summary">—</span><div><label for="page-size">每页</label><select id="page-size"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select><button id="page-prev" type="button">上一页</button><button id="page-next" type="button">下一页</button></div></div>
+  </section>
+</main>
+<dialog id="upload-dialog" class="dem-dialog"><form method="dialog"><div class="dialog-head"><div><label>DEM_DATA_ROOT</label><h2>上传原始 DEM</h2></div><button value="cancel" class="close" type="button">×</button></div><div class="dem-dialog-body"><p>上传到 <code id="upload-target"></code>。支持单波段、带坐标系的 GeoTIFF；同名文件不会被覆盖。</p><input id="upload-files" type="file" accept=".tif,.tiff,image/tiff" multiple><div id="upload-progress" class="dem-progress hidden"><div></div></div><small id="upload-status">尚未选择文件</small><div id="upload-error" class="form-error hidden"></div></div><div class="dialog-actions"><button value="cancel" type="button">取消</button><button id="upload-submit" class="primary" type="button">上传</button></div></form></dialog>
+<dialog id="import-dialog" class="dem-dialog"><form method="dialog"><div class="dialog-head"><div><label>发布配置</label><h2>导入并构建元数据</h2></div><button value="cancel" class="close" type="button">×</button></div><div class="dem-dialog-body"><p>重新扫描源文件、更新空间索引并发布新版本。现有缓存按版本保留。</p><div class="dem-form-grid"><label>名称<input id="import-title" required></label><label>垂直基准<input id="import-datum" required placeholder="例如 EGM96 / EPSG:5773"></label><label>高程单位<select id="import-unit"><option value="metre">米</option><option value="foot">英尺</option></select></label><label>最大级别<input id="import-max-zoom" type="number" min="0" max="22" value="18"></label></div><details class="dem-datum-help"><summary>垂直基准该如何填写？</summary><p>填写 DEM 像元高程值所参照的高程参考面，以数据提供方说明为准。例如 EGM96（EPSG:5773）、1985 国家高程基准，或 WGS84 椭球高。EPSG:4326 只描述水平位置，不能据此判断高程基准。来源不明时填写“未知（待核实）”，不要猜测。填写此字段不会触发高程基准转换；同一数据集的源文件应使用相同基准。</p></details><label class="dem-checkbox"><input id="import-cog" type="checkbox" checked>为源文件生成带概览图的 COG 副本</label><div id="import-error" class="form-error hidden"></div></div><div class="dialog-actions"><button value="cancel" type="button">取消</button><button id="import-submit" class="primary" type="button">开始导入</button></div></form></dialog>
+<div id="toast"></div><script src="/assets/terrain.js" defer></script>
+</body></html>

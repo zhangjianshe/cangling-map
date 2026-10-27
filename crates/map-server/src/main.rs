@@ -56,6 +56,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Semaphore};
 use tower_http::trace::TraceLayer;
 
+mod terrain;
+
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -662,6 +664,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/style-assets", get(style_assets_page))
         .route("/metrics", get(metrics_page))
         .route("/settings/cache", get(cache_settings_page))
+        .route("/terrain", get(terrain_page))
+        .route("/assets/terrain.js", get(terrain_script))
+        .route("/assets/terrain.css", get(terrain_styles))
         .route("/api/metrics", get(metrics_snapshot))
         .route(
             "/api/settings/cache-service",
@@ -692,6 +697,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/wms", get(wms))
         .route("/wmts", get(wmts))
+        .route(
+            "/api/terrain/{id}/import",
+            axum::routing::post(terrain::import_dem),
+        )
+        .route("/api/terrain/{id}/metadata", get(terrain::dem_metadata))
+        .route("/api/terrain/datasets", get(terrain::list_dem_datasets))
+        .route("/api/terrain/{id}/files", get(terrain::list_dem_files))
+        .route(
+            "/api/terrain/{id}/files/{filename}",
+            axum::routing::put(terrain::upload_dem_file),
+        )
+        .route(
+            "/api/terrain/{id}/tiles/{revision}/{z}/{x}/{y}",
+            get(terrain::dem_tile),
+        )
         .route("/{workspace}/wms", get(geoserver_workspace_wms))
         .route("/geoserver/{workspace}/wms", get(geoserver_workspace_wms))
         .route(
@@ -1027,6 +1047,24 @@ async fn metrics_page(headers: HeaderMap) -> Html<String> {
 }
 async fn cache_settings_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/cache-settings.html"), &headers)
+}
+async fn terrain_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/terrain.html"), &headers)
+}
+async fn terrain_script() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../web/terrain.js"),
+    )
+}
+async fn terrain_styles() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../web/terrain.css"),
+    )
 }
 
 async fn get_cache_service_settings(State(state): State<AppState>) -> Response {

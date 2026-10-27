@@ -7,6 +7,9 @@ use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod terrain;
+pub use terrain::{DemAsset, DemDataset};
+
 const CATALOG_ID_DOMAIN: &[u8] = b"cangling-map/catalog-item/v1\0";
 const PUBLISHED_LAYER_ID_DOMAIN: &[u8] = b"cangling-map/published-layer/v1\0";
 const LAYER_GROUP_ID_DOMAIN: &[u8] = b"cangling-map/layer-group/v1\0";
