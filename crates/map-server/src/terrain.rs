@@ -15,7 +15,7 @@ use axum::{
     Json,
 };
 use gdal::{
-    raster::{reproject, RasterCreationOptions},
+    raster::RasterCreationOptions,
     spatial_ref::{AxisMappingStrategy, CoordTransform, SpatialRef},
     Dataset, DriverManager,
 };
@@ -625,39 +625,15 @@ fn dem_data_root() -> PathBuf {
 
 fn render_dem(assets: Vec<DemAsset>, bounds: [f64; 4]) -> Result<Vec<u8>, String> {
     let mut heights = vec![f64::NAN; TILE_SIZE * TILE_SIZE];
-    let driver = DriverManager::get_driver_by_name("MEM").map_err(|e| e.to_string())?;
-    let srs = SpatialRef::from_epsg(3857).map_err(|e| e.to_string())?;
     for asset in assets {
         if heights.iter().all(|h| h.is_finite()) {
             break;
         }
         let source = Dataset::open(&asset.path).map_err(|e| e.to_string())?;
-        let mut target = driver
-            .create_with_band_type::<f32, _>("", TILE_SIZE, TILE_SIZE, 1)
-            .map_err(|e| e.to_string())?;
-        target.set_spatial_ref(&srs).map_err(|e| e.to_string())?;
-        target
-            .set_geo_transform(&[
-                bounds[0],
-                (bounds[2] - bounds[0]) / TILE_SIZE as f64,
-                0.0,
-                bounds[3],
-                0.0,
-                -(bounds[3] - bounds[1]) / TILE_SIZE as f64,
-            ])
-            .map_err(|e| e.to_string())?;
-        let mut band = target.rasterband(1).map_err(|e| e.to_string())?;
-        band.set_no_data_value(Some(VOID))
-            .map_err(|e| e.to_string())?;
-        band.fill(VOID, None).map_err(|e| e.to_string())?;
-        reproject(&source, &target).map_err(|e| e.to_string())?;
-        let pixels = target
-            .rasterband(1)
-            .map_err(|e| e.to_string())?
-            .read_band_as::<f32>()
+        let pixels = cangling_gdal_core::warp_dem_tile(&source, bounds, TILE_SIZE, VOID as f32)
             .map_err(|e| e.to_string())?;
         let scale = if asset.unit == "foot" { 0.3048 } else { 1.0 };
-        for (out, value) in heights.iter_mut().zip(pixels.data()) {
+        for (out, value) in heights.iter_mut().zip(&pixels) {
             if !out.is_finite() && value.is_finite() && f64::from(*value) > VOID / 2.0 {
                 *out = f64::from(*value) * scale;
             }

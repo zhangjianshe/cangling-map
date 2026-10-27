@@ -132,6 +132,11 @@ EPSG:4326 是水平坐标参考系，不能据此推断高程基准；来源不�
 `$DEM_DATA_ROOT/<dataset-id>/optimized/<revision>/` 生成带数值平均概览图的 COG
 副本，并以副本作为发布源；原始文件不会被改写。省略该选项时直接发布源文件，
 适合已经制作为 COG 的数据。旧版本的 COG 与瓦片缓存可在确认不再使用后清理。
+全国等大范围 DEM 若由大量 1° 源文件组成，可先用 `gdalbuildvrt` 镶嵌，再用
+`gdal_translate -of COG -co BIGTIFF=YES -co COMPRESS=DEFLATE -co BLOCKSIZE=512`
+生成带内部概览层的单文件 COG；仅将成品放入 `source/` 后重新导入。
+原始分幅可保存在同一数据集目录的 `raw-tiles/`，该目录不会被导入扫描。
+DEM 瓦片渲染使用 GDAL Warp 的概览层选择，在低缩放级别避免逐幅重投影完整分辨率数据。
 上传 API 为 `PUT /api/terrain/<dataset-id>/files/<filename.tif>`，请求体是原始文件字节；
 文件列表 API 为 `GET /api/terrain/<dataset-id>/files?page=1&page_size=20`。
 上传使用流式写盘，默认单文件上限 8 GiB，可用 `DEM_UPLOAD_MAX_BYTES` 调整。

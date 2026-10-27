@@ -12,6 +12,17 @@ use thiserror::Error;
 mod ffi;
 mod tiny_skia_renderer;
 
+/// Warp a numeric DEM into a Web Mercator tile, selecting source overviews
+/// when the requested grid is coarser than the source raster.
+pub fn warp_dem_tile(
+    source: &Dataset,
+    bounds: [f64; 4],
+    size: usize,
+    nodata: f32,
+) -> Result<Vec<f32>, GdalError> {
+    ffi::warp_dem_tile(source, bounds, size, nodata)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BoundingBox {
     pub min_x: f64,

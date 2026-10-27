@@ -125,6 +125,55 @@ pub(crate) fn render(request: &RasterRenderRequest) -> Result<RenderedImage, Gda
     })
 }
 
+pub(crate) fn warp_dem_tile(
+    source: &Dataset,
+    bounds: [f64; 4],
+    size: usize,
+    nodata: f32,
+) -> Result<Vec<f32>, GdalError> {
+    if size == 0
+        || !bounds.iter().all(|value| value.is_finite())
+        || bounds[0] >= bounds[2]
+        || bounds[1] >= bounds[3]
+    {
+        return Err(GdalError::InvalidRequest("invalid DEM tile grid".into()));
+    }
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let path = CString::new(format!(
+        "/vsimem/cangling-dem-{}-{id}.tif",
+        std::process::id()
+    ))
+    .map_err(invalid_string)?;
+    let cleanup = VsiCleanup::paths(vec![&path]);
+    let args = [
+        "-of".to_owned(),
+        "GTiff".to_owned(),
+        "-ot".to_owned(),
+        "Float32".to_owned(),
+        "-t_srs".to_owned(),
+        "EPSG:3857".to_owned(),
+        "-te".to_owned(),
+        bounds[0].to_string(),
+        bounds[1].to_string(),
+        bounds[2].to_string(),
+        bounds[3].to_string(),
+        "-ts".to_owned(),
+        size.to_string(),
+        size.to_string(),
+        "-r".to_owned(),
+        "bilinear".to_owned(),
+        "-ovr".to_owned(),
+        "AUTO".to_owned(),
+        "-dstnodata".to_owned(),
+        nodata.to_string(),
+    ];
+    let warped = unsafe { warp(source, &path, &args)? };
+    let pixels = warped.rasterband(1)?.read_band_as::<f32>()?.data().to_vec();
+    drop(warped);
+    drop(cleanup);
+    Ok(pixels)
+}
+
 pub(crate) fn render_vector(request: &VectorRenderRequest) -> Result<RenderedImage, GdalError> {
     with_projected_vector(request, crate::tiny_skia_renderer::render_projected)
 }
