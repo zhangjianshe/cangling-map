@@ -28,7 +28,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::{tile_flight, AppState, WmtsCacheKey};
+use crate::{
+    active_wmts_cache, cache_get, cache_put, sha256_hex, tile_flight, AppState, WmtsCache,
+    WmtsCacheKey,
+};
 
 const TILE_SIZE: usize = 256;
 const VOID: f64 = -3.0e38;
@@ -330,17 +333,14 @@ pub(crate) async fn dem_tile(
     if i64::from(z) < dataset.min_zoom || i64::from(z) > dataset.max_zoom {
         return Err((StatusCode::NOT_FOUND, "zoom outside DEM range".into()));
     }
+    let cache = active_wmts_cache(&state);
     let path = tile_cache_path(&id, &revision, z, x, y);
-    if let Ok(bytes) = fs::read(&path) {
-        return Ok(png_response(bytes));
+    let key = dem_cache_key(&id, &revision, z, x, y);
+    match dem_cache_get(&cache, &key, &path).await {
+        Ok(Some(bytes)) => return Ok(png_response(bytes)),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "DEM cache read failed; rendering tile"),
     }
-    let key = WmtsCacheKey {
-        database: "dem".into(),
-        item: format!("{id}/{revision}"),
-        zoom: z,
-        col: x,
-        row: y,
-    };
     let flight = tile_flight(&state, &key);
     let _guard = flight.lock().await;
     if state
@@ -352,8 +352,10 @@ pub(crate) async fn dem_tile(
     {
         return Err((StatusCode::NOT_FOUND, "DEM revision not found".into()));
     }
-    if let Ok(bytes) = fs::read(&path) {
-        return Ok(png_response(bytes));
+    match dem_cache_get(&cache, &key, &path).await {
+        Ok(Some(bytes)) => return Ok(png_response(bytes)),
+        Ok(None) => {}
+        Err(error) => tracing::warn!(%error, "DEM cache read failed after waiting; rendering tile"),
     }
 
     let mercator = [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y];
@@ -367,10 +369,54 @@ pub(crate) async fn dem_tile(
         .await
         .map_err(internal)?
         .map_err(internal)?;
-    if let Err(error) = write_cache_atomic(&path, &bytes) {
-        tracing::warn!(path = %path.display(), %error, "DEM cache write failed");
+    if let Err(error) = dem_cache_put(&cache, &key, &path, &dataset.title, &bytes).await {
+        tracing::warn!(%error, "DEM cache write failed; returning rendered tile");
     }
     Ok(png_response(bytes))
+}
+
+fn dem_cache_key(id: &str, revision: &str, z: u8, x: u32, y: u32) -> WmtsCacheKey {
+    // Cangling Tile's item is one URL path segment. Hash the dataset and
+    // revision together so a republish always gets a distinct cache entry.
+    WmtsCacheKey {
+        database: "dem".into(),
+        item: sha256_hex(format!("{id}:{revision}").as_bytes()),
+        zoom: z,
+        col: x,
+        row: y,
+    }
+}
+
+async fn dem_cache_get(
+    cache: &WmtsCache,
+    key: &WmtsCacheKey,
+    path: &FsPath,
+) -> Result<Option<Vec<u8>>, String> {
+    match cache {
+        WmtsCache::CanglingTile { .. } => cache_get(cache, key).await,
+        WmtsCache::Filesystem { .. } => match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.to_string()),
+        },
+        WmtsCache::None => Ok(None),
+    }
+}
+
+async fn dem_cache_put(
+    cache: &WmtsCache,
+    key: &WmtsCacheKey,
+    path: &FsPath,
+    title: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    match cache {
+        WmtsCache::CanglingTile { .. } => cache_put(cache, key, "DEM", title, bytes).await,
+        WmtsCache::Filesystem { .. } => {
+            write_cache_atomic(path, bytes).map_err(|error| error.to_string())
+        }
+        WmtsCache::None => Ok(()),
+    }
 }
 
 fn inspect_import(
@@ -703,7 +749,17 @@ fn internal(error: impl ToString) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_height, is_dem_filename};
+    use super::{dem_cache_key, encode_height, is_dem_filename};
+
+    #[test]
+    fn dem_cache_key_uses_one_item_segment_and_changes_with_revision() {
+        let first = dem_cache_key("sichuan", "old-revision", 8, 3, 4);
+        let next = dem_cache_key("sichuan", "new-revision", 8, 3, 4);
+        assert_eq!(first.database, "dem");
+        assert_eq!(first.item.len(), 64);
+        assert!(first.item.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first.item, next.item);
+    }
 
     #[test]
     fn terrarium_height_encoding_preserves_signed_metres_and_void() {

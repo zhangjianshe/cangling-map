@@ -83,7 +83,7 @@ location ^~ /geoserver/ {
 | 中文标注字体 | `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc` | `MAP_FONT_PATH` |
 | GPU 就绪网格缓存 | `/cache/gpu-mesh` | `MAP_GPU_MESH_CACHE_PATH` |
 | DEM 原始文件 | `/data/dem` | `DEM_DATA_ROOT` |
-| DEM Terrarium 瓦片缓存 | `/cache/terrain` | `DEM_CACHE_PATH` |
+| DEM Terrarium 本地缓存（文件系统模式） | `/cache/terrain` | `DEM_CACHE_PATH` |
 
 `WMTS_CACHE_PATH`、`VECTOR_PROJECTION_CACHE_PATH` 和 `MAP_GPU_MESH_CACHE_PATH` 是可选的
 细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
@@ -99,13 +99,17 @@ location ^~ /geoserver/ {
 
 将同一数据集的一组单波段高程 GeoTIFF 放在
 `$DEM_DATA_ROOT/<dataset-id>/source/`。导入只读取该目录下一层的 `.tif`、`.tiff`；
-发布中的源文件视为不可变，替换文件后须重新导入。源数据和生成的瓦片缓存分别位于
-`/data/dem` 与 `/cache/terrain`，清理缓存不会删除原始 DEM。
+发布中的源文件视为不可变，替换文件后须重新导入。源数据位于 `/data/dem`，
+清理瓦片缓存不会删除原始 DEM。
 
 导入会检查坐标系、地理范围、波段数、高程单位及像元缩放系数，并将每个文件的
 EPSG:3857 覆盖范围写入 SQLite R-tree 索引。请求瓦片时，服务先按发布版本读缓存；
 未命中才检索相交文件，用 GDAL 重投影并以双线性方式采样数值高程，最后编码为
 256×256 Terrarium RGB PNG。无覆盖的瓦片编码为全 NoData 黑色瓦片，也会被缓存。
+DEM 使用当前瓦片缓存后端：`WMTS_CACHE_BACKEND=cangling-tile` 时，按数据集和
+发布版本写入 Cangling Tile 的 `dem` 数据库；文件系统模式下使用
+`DEM_CACHE_PATH`（默认 `/cache/terrain`）；`none` 模式不缓存。远程缓存暂时不可用时
+仍会返回新渲染的瓦片，但该次结果不会写入本地缓存。
 重叠文件按 `priorities` 中的数值优先级排序，优先级相同时选较高分辨率；
 空洞由其他文件补齐。例如导入 JSON 可包含
 `"priorities":{"local_high_res.tif":10}`。
