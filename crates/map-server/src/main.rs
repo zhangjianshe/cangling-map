@@ -15,7 +15,7 @@ use anyhow::Context;
 use axum::{
     body::Bytes as AxumBytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -54,7 +54,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Semaphore};
-use tower_http::trace::TraceLayer;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
 
 mod terrain;
 
@@ -652,6 +655,21 @@ async fn main() -> anyhow::Result<()> {
         prepared_vector_sources: Arc::new(Mutex::new(HashSet::new())),
         metrics: Arc::new(ServiceMetrics::default()),
     };
+    // Terrain metadata and versioned tiles are public, read-only resources.
+    // Restrict cross-origin access to these routes; import/upload APIs retain
+    // the default same-origin policy.
+    let public_terrain = Router::new()
+        .route("/api/terrain/{id}/metadata", get(terrain::dem_metadata))
+        .route(
+            "/api/terrain/{id}/tiles/{revision}/{z}/{x}/{y}",
+            get(terrain::dem_tile),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD])
+                .allow_headers(Any),
+        );
     let app = Router::new()
         .route("/", get(metrics_page))
         .route("/catalog", get(index))
@@ -701,17 +719,13 @@ async fn main() -> anyhow::Result<()> {
             "/api/terrain/{id}/import",
             axum::routing::post(terrain::import_dem),
         )
-        .route("/api/terrain/{id}/metadata", get(terrain::dem_metadata))
         .route("/api/terrain/datasets", get(terrain::list_dem_datasets))
         .route("/api/terrain/{id}/files", get(terrain::list_dem_files))
         .route(
             "/api/terrain/{id}/files/{filename}",
             axum::routing::put(terrain::upload_dem_file),
         )
-        .route(
-            "/api/terrain/{id}/tiles/{revision}/{z}/{x}/{y}",
-            get(terrain::dem_tile),
-        )
+        .merge(public_terrain)
         .route("/{workspace}/wms", get(geoserver_workspace_wms))
         .route("/geoserver/{workspace}/wms", get(geoserver_workspace_wms))
         .route(
