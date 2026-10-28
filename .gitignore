@@ -11,6 +11,11 @@ wmts-cache/
 cache/
 map-settings.json
 
+# Rebuildable OpenStreetMap extracts and the derived administration catalog.
+/data/osm/
+/data/admin.sqlite*
+/data/catalog.db.empty-*
+
 # Administrative source datasets are deployment assets, not Git source files.
 /backups/*/data/*
 !/backups/*/data/.gitkeep

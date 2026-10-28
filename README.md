@@ -77,6 +77,7 @@ location ^~ /geoserver/ {
 | --- | --- | --- |
 | SQLite 目录库 | `/data/catalog.db` | `CATALOG_DATABASE_URL` |
 | 全球地名库 | `/usr/share/cangling-map/placenames.sqlite` | `PLACENAMES_DATABASE_URL` |
+| 中国 OSM 行政区划库 | `/data/admin.sqlite` | `ADMIN_DATABASE_URL` |
 | 样式图片 | `/data/style-assets` | `STYLE_ASSET_ROOT` |
 | 本地缓存根目录 | `/cache` | `MAP_CACHE_ROOT` |
 | WMTS 瓦片缓存 | `/cache/wmts` | `WMTS_CACHE_PATH` |
@@ -117,6 +118,57 @@ GET /api/placenames/tiles/{z}/{x}/{y}?lang=zh
 返回 512 条；客户端仍需做屏幕空间避让。数据源为
 [Natural Earth](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-populated-places/)
 （public domain）。
+
+## 中国 OSM 行政区划与地名
+
+行政区划库使用 [Geofabrik 的中国 OpenStreetMap 提取文件](https://download.geofabrik.de/asia/china.html)构建。
+原始 PBF 和生成的 SQLite 库均不属于程序源码，放在 `data/osm/`、`data/admin.sqlite`，
+部署时挂载到容器 `/data/admin.sqlite`。Geofabrik 的区域 PBF 不含完整国界面，
+因此另取 OSM 中国关系 270056 的完整 XML。福建、海南、西藏的省级面及澳门的
+`admin_level=3` 特别行政区面也从各自 OSM 关系补齐；仍保留原始 OSM 层级。
+更新时下载新的 PBF 和这些关系 XML，将快照日期分别填为实际获取日期后运行：
+
+```bash
+curl -fL -o data/osm/china-latest.osm.pbf \
+  https://download.geofabrik.de/asia/china-latest.osm.pbf
+curl -fL -o data/osm/china-boundary.osm \
+  https://api.openstreetmap.org/api/0.6/relation/270056/full
+for id in 553303 2128285 153292 1867188; do
+  curl -fL -o "data/osm/relation-${id}.osm" \
+    "https://api.openstreetmap.org/api/0.6/relation/${id}/full"
+done
+python3 tools/build-admin-osm.py \
+  --source data/osm/china-latest.osm.pbf \
+  --country-osm data/osm/china-boundary.osm \
+  --output data/admin.sqlite --snapshot YYYY-MM-DD \
+  --country-snapshot YYYY-MM-DD \
+  --supplement-relation 553303=data/osm/relation-553303.osm \
+  --supplement-relation 2128285=data/osm/relation-2128285.osm \
+  --supplement-relation 153292=data/osm/relation-153292.osm \
+  --supplement-relation 1867188=data/osm/relation-1867188.osm \
+  --supplement-snapshot YYYY-MM-DD
+```
+
+脚本需要 GDAL OSM/GPKG 驱动，生成时读取边界面和村庄/自然村点，简化各级边界，
+写入带 R-tree 索引的 SQLite。服务自动发现本地 `data/admin.sqlite`，或使用
+`ADMIN_DATABASE_URL=sqlite:///data/admin.sqlite?mode=ro` 指定挂载库。无库时接口
+返回 `available: false`，其他地图服务可照常启动。发布前检查元数据中的快照日期、
+SHA-256 和各级数量：
+
+```text
+GET /api/admin/metadata
+GET /api/admin/tiles/{z}/{x}/{y}?lang=zh
+```
+
+瓦片返回地名点 `features` 和 GeoJSON 边界 `boundaries`，坐标为 WGS84 经纬度。
+缩放级别 0–3 显示国界（OSM `admin_level=2`），4–6 省界（4，含澳门的 3），7–8 市级（5），
+9–11 县界（6），12–14 乡镇界（8），15–20 村界及村庄点（10）。
+这是 OSM 社区数据，不是法定行政区划；全国范围尤其村界有覆盖缺口，
+空瓦片不能解释为没有行政区划。接口及衍生数据库须保留
+[© OpenStreetMap contributors / ODbL 1.0](https://www.openstreetmap.org/copyright/All)
+署名与许可信息。数据库元数据记录快照、来源、许可、校验和、各级地名数量及
+实际可绘制的边界数量。2026-10-27 的中国区域快照包含 496,048 条村级名称，
+其中只有 9,407 条村级面边界；其余名称来自村庄和自然村点。
 
 ## DEM 高程瓦片
 

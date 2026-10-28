@@ -60,7 +60,7 @@ pub(crate) async fn tile(
     })))
 }
 
-fn tile_bounds(z: u8, x: u32, y: u32) -> Option<[f64; 4]> {
+pub(crate) fn tile_bounds(z: u8, x: u32, y: u32) -> Option<[f64; 4]> {
     if z > MAX_ZOOM || x >= (1_u32 << z) || y >= (1_u32 << z) {
         return None;
     }
