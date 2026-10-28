@@ -76,6 +76,7 @@ location ^~ /geoserver/ {
 | 用途 | 容器默认路径 | 配置项 |
 | --- | --- | --- |
 | SQLite 目录库 | `/data/catalog.db` | `CATALOG_DATABASE_URL` |
+| 全球地名库 | `/usr/share/cangling-map/placenames.sqlite` | `PLACENAMES_DATABASE_URL` |
 | 样式图片 | `/data/style-assets` | `STYLE_ASSET_ROOT` |
 | 本地缓存根目录 | `/cache` | `MAP_CACHE_ROOT` |
 | WMTS 瓦片缓存 | `/cache/wmts` | `WMTS_CACHE_PATH` |
@@ -89,6 +90,33 @@ location ^~ /geoserver/ {
 细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
 `MAP_CACHE_ROOT/vector-projection` 和 `MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
 `MAP_CACHE_ROOT` 默认为当前目录下的 `cache`。
+
+## 地名标注数据
+
+`data/placenames.sqlite` 是独立于目录库的只读 SQLite 数据库，内置 Natural Earth
+10m Populated Places 5.1.2 的 7,342 个居民地点，保存 WGS84 经纬度、中文/英文名称、
+标注等级、最小显示级别及 R-tree 空间索引。Docker 镜像将它放在
+`/usr/share/cangling-map/placenames.sqlite`；可以通过 `PLACENAMES_DATABASE_URL`
+切换到自行构建的数据库。更新数据时运行：
+
+```bash
+python3 tools/build-placenames.py --source /path/to/ne_10m_populated_places.zip
+```
+
+脚本也可省略 `--source` 从 Natural Earth 下载原始 ZIP；需要 GDAL Python bindings。
+读取接口与 DEM 一样允许跨域 GET/HEAD：
+
+```text
+GET /api/placenames/metadata
+GET /api/placenames/tiles/{z}/{x}/{y}?lang=zh
+```
+
+第二个接口返回 XYZ/Web Mercator 范围内的 JSON 点位数组（`features` 含
+`name`、`longitude`、`latitude`、`label_rank`、`min_zoom`、`population`），
+支持 `lang=zh|en|default`。服务按数据建议级别和标注优先级筛选，每个瓦片最多
+返回 512 条；客户端仍需做屏幕空间避让。数据源为
+[Natural Earth](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-populated-places/)
+（public domain）。
 
 ## DEM 高程瓦片
 

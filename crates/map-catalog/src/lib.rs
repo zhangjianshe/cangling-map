@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 mod terrain;
 pub use terrain::{DemAsset, DemDataset};
+mod placenames;
+pub use placenames::{PlaceName, SqlitePlaceNames};
 
 const CATALOG_ID_DOMAIN: &[u8] = b"cangling-map/catalog-item/v1\0";
 const PUBLISHED_LAYER_ID_DOMAIN: &[u8] = b"cangling-map/published-layer/v1\0";

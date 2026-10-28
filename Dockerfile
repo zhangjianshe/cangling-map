@@ -50,10 +50,12 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
     && mkdir -p /data/style-assets /cache/wmts /cache/vector-projection \
     && chown -R cangling:cangling /data /cache
 COPY --from=builder /usr/local/bin/cangling-map /usr/local/bin/cangling-map
+COPY data/placenames.sqlite /usr/share/cangling-map/placenames.sqlite
 USER cangling
 WORKDIR /data
 ENV MAP_SERVER_ADDRESS=0.0.0.0:3000 \
     CATALOG_DATABASE_URL=sqlite:///data/catalog.db?mode=rwc \
+    PLACENAMES_DATABASE_URL=sqlite:///usr/share/cangling-map/placenames.sqlite?mode=ro \
     WMTS_CACHE_BACKEND=filesystem \
     MAP_CACHE_ROOT=/cache \
     MAP_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \

@@ -3,7 +3,8 @@
 target
 catalog.db
 catalog.db.*
-data
+data/*
+!data/placenames.sqlite
 cache
 backups
 wmts-cache*

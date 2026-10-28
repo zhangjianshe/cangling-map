@@ -32,7 +32,7 @@ use hyper_util::{
 };
 use map_catalog::{
     Catalog, CatalogItem, CatalogItemId, LayerGroup, LayerGroupMember, PublicationStore,
-    PublishedLayer, SourceKind, SqliteCatalog, StyleRecord, StyleStore,
+    PublishedLayer, SourceKind, SqliteCatalog, SqlitePlaceNames, StyleRecord, StyleStore,
 };
 use map_render::{
     blank_image, blank_png, FallbackRasterizerStats, FallbackVectorRasterizer,
@@ -59,6 +59,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+mod placenames;
 mod terrain;
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
@@ -66,6 +67,7 @@ static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>>
 #[derive(Clone)]
 struct AppState {
     catalog: SqliteCatalog,
+    placenames: SqlitePlaceNames,
     wmts_cache: Arc<StdMutex<WmtsCache>>,
     local_wmts_cache: WmtsCache,
     cache_service_settings: Arc<StdMutex<CacheServiceSettings>>,
@@ -623,6 +625,11 @@ async fn main() -> anyhow::Result<()> {
     let catalog = SqliteCatalog::connect(&database_url)
         .await
         .context("failed to initialize catalog")?;
+    let placenames_url = std::env::var("PLACENAMES_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://data/placenames.sqlite?mode=ro".into());
+    let placenames = SqlitePlaceNames::connect(&placenames_url)
+        .await
+        .context("failed to open place-name database")?;
     let cache_service_settings: CacheServiceSettings = catalog
         .get_setting("cache_service")
         .await
@@ -642,6 +649,7 @@ async fn main() -> anyhow::Result<()> {
         configure_vector_rasterizer()?;
     let state = AppState {
         catalog,
+        placenames,
         wmts_cache: Arc::new(StdMutex::new(active_wmts_cache)),
         local_wmts_cache,
         cache_service_settings: Arc::new(StdMutex::new(cache_service_settings)),
@@ -659,6 +667,8 @@ async fn main() -> anyhow::Result<()> {
     // Restrict cross-origin access to these routes; import/upload APIs retain
     // the default same-origin policy.
     let public_terrain = Router::new()
+        .route("/api/placenames/metadata", get(placenames::metadata))
+        .route("/api/placenames/tiles/{z}/{x}/{y}", get(placenames::tile))
         .route("/api/terrain/{id}/metadata", get(terrain::dem_metadata))
         .route(
             "/api/terrain/{id}/tiles/{revision}/{z}/{x}/{y}",
