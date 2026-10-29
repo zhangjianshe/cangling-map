@@ -160,6 +160,11 @@ GET /api/admin/metadata
 GET /api/admin/tiles/{z}/{x}/{y}?lang=zh
 ```
 
+元数据包含数据库内容的 SHA-256 `dataset_revision`，响应使用 `Cache-Control: no-cache`
+及 `ETag`，以便客户端每次启动时验证版本。带
+`revision={dataset_revision}` 的瓦片 URL 使用一年不可变缓存；不带版本的 URL
+缓存 5 分钟并支持 `ETag` 条件请求。版本不匹配时返回 409，避免把新库内容写入旧版本缓存。
+
 瓦片返回地名点 `features` 和 GeoJSON 边界 `boundaries`，坐标为 WGS84 经纬度。
 缩放级别 0–3 显示国界，4–6 省界（含澳门特别行政区），7–8 市级，
 9–11 县界（6），12–14 乡镇界（8），15–20 村界及村庄点（10）。

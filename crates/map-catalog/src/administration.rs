@@ -1,8 +1,12 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Read};
 
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
+use sha2::{Digest, Sha256};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    FromRow, SqlitePool,
+};
 
 use crate::CatalogError;
 
@@ -10,6 +14,7 @@ use crate::CatalogError;
 pub struct SqliteAdmin {
     pool: SqlitePool,
     attribution: String,
+    revision: String,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -37,6 +42,24 @@ struct BoundaryRow {
 
 impl SqliteAdmin {
     pub async fn connect(url: &str) -> Result<Self, CatalogError> {
+        let options: SqliteConnectOptions = url.parse()?;
+        let mut file = std::fs::File::open(options.get_filename()).map_err(|error| {
+            CatalogError::InvalidData(format!(
+                "cannot read administration database for revision: {error}"
+            ))
+        })?;
+        let mut hasher = Sha256::new();
+        let mut chunk = vec![0_u8; 1024 * 1024];
+        loop {
+            let count = file.read(&mut chunk).map_err(|error| {
+                CatalogError::InvalidData(format!("cannot hash administration database: {error}"))
+            })?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&chunk[..count]);
+        }
+        let revision = format!("{:x}", hasher.finalize());
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect(url)
@@ -55,11 +78,19 @@ impl SqliteAdmin {
                 .fetch_optional(&pool)
                 .await?
                 .unwrap_or_else(|| "© OpenStreetMap contributors".into());
-        Ok(Self { pool, attribution })
+        Ok(Self {
+            pool,
+            attribution,
+            revision,
+        })
     }
 
     pub fn attribution(&self) -> &str {
         &self.attribution
+    }
+
+    pub fn revision(&self) -> &str {
+        &self.revision
     }
 
     pub async fn metadata(&self) -> Result<BTreeMap<String, String>, CatalogError> {
@@ -192,6 +223,7 @@ mod tests {
         let admin = SqliteAdmin {
             pool,
             attribution: String::new(),
+            revision: String::new(),
         };
         assert_eq!(
             admin
