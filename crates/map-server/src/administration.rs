@@ -1,4 +1,4 @@
-//! Read-only XYZ vector tiles for OSM China administrative names and boundaries.
+//! Read-only XYZ JSON tiles for China administrative names and boundaries.
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -24,13 +24,25 @@ pub(crate) async fn metadata(State(state): State<AppState>) -> Result<Json<Value
         ));
     };
     let metadata = admin.metadata().await.map_err(internal)?;
+    let official = metadata.contains_key("ngcc_source_snapshot");
+    let github_mirror = metadata.contains_key("geocode_mirror_commit");
+    let preview =
+        metadata.contains_key("taiwan_preview_source") || metadata.contains_key("dash_source");
     Ok(Json(json!({
         "available": true,
         "metadata": metadata,
         "tile_url": "/api/admin/tiles/{z}/{x}/{y}?lang=zh",
         "zoom_levels": {"country": [0,3], "province": [4,6], "prefecture": [7,8],
                         "county": [9,11], "township": [12,14], "village": [15,20]},
-        "coverage_note": "OSM community coverage is incomplete, especially village boundaries"
+        "coverage_note": if official {
+            "National 1:1M public data supplies country, province and prefecture tiers; finer OSM tiers may be incomplete"
+        } else if github_mirror {
+            "Country, province, prefecture and county polygons use a GitHub mirror that claims Tianditu origin; original source snapshot and license are unverified. Township and village coverage remains OSM and may be incomplete"
+        } else if preview {
+            "Country, province and prefecture tiers remain OSM; Taiwan and sea dashes are separately attributed community derivatives of NGCC data"
+        } else {
+            "OSM community coverage is incomplete, especially village boundaries"
+        }
     })))
 }
 
@@ -68,7 +80,7 @@ pub(crate) async fn tile(
         "admin_level": level,
         "features": features,
         "boundaries": boundaries,
-        "attribution": "© OpenStreetMap contributors",
+        "attribution": admin.attribution(),
         "available": true
     })))
 }

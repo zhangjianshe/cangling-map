@@ -9,6 +9,7 @@ use crate::CatalogError;
 #[derive(Clone)]
 pub struct SqliteAdmin {
     pool: SqlitePool,
+    attribution: String,
 }
 
 #[derive(Debug, FromRow, Serialize)]
@@ -49,7 +50,16 @@ impl SqliteAdmin {
                 "unsupported administration schema version: {version}"
             )));
         }
-        Ok(Self { pool })
+        let attribution: String =
+            sqlx::query_scalar("SELECT value FROM metadata WHERE key='attribution'")
+                .fetch_optional(&pool)
+                .await?
+                .unwrap_or_else(|| "© OpenStreetMap contributors".into());
+        Ok(Self { pool, attribution })
+    }
+
+    pub fn attribution(&self) -> &str {
+        &self.attribution
     }
 
     pub async fn metadata(&self) -> Result<BTreeMap<String, String>, CatalogError> {
@@ -80,7 +90,7 @@ impl SqliteAdmin {
         let sql = format!(
             "SELECT -a.id AS id,{name} AS name,a.longitude,a.latitude,a.level AS admin_level \
              FROM {join} \
-             WHERE a.id=b.id AND a.level IN (?,?) AND b.max_lon>=? AND b.min_lon<? \
+             WHERE a.id=b.id AND a.level IN (?,?) AND a.name<>'' AND b.max_lon>=? AND b.min_lon<? \
              AND b.max_lat>=? AND b.min_lat<? \
              AND a.longitude>=? AND a.longitude<? AND a.latitude>=? AND a.latitude<? \
              ORDER BY a.id LIMIT ?"
@@ -116,7 +126,9 @@ impl SqliteAdmin {
         let sql = format!(
             "SELECT -a.id AS id,a.level,a.geometry_json \
              FROM {join} \
-             WHERE a.id=b.id AND a.level IN (?,?) AND a.geometry_json IS NOT NULL \
+             WHERE a.id=b.id AND (a.level IN (?,?) OR \
+               (a.source_id='overlay/south-china-sea-dashes' AND ? IN (2,4))) \
+             AND a.geometry_json IS NOT NULL \
              AND b.max_lon>=? AND b.min_lon<? AND b.max_lat>=? AND b.min_lat<? \
              AND a.max_lon>=? AND a.min_lon<? AND a.max_lat>=? AND a.min_lat<? \
              ORDER BY a.id LIMIT ?"
@@ -124,6 +136,7 @@ impl SqliteAdmin {
         let rows = sqlx::query_as::<_, BoundaryRow>(&sql)
             .bind(level)
             .bind(if level == 4 { 3 } else { level })
+            .bind(level)
             .bind(bounds[0])
             .bind(bounds[2])
             .bind(bounds[1])
@@ -159,24 +172,27 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE admin_units(id INTEGER PRIMARY KEY,level INTEGER,name TEXT,name_zh TEXT,name_en TEXT,longitude REAL,latitude REAL,min_lon REAL,max_lon REAL,min_lat REAL,max_lat REAL,geometry_json TEXT)").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE admin_units(id INTEGER PRIMARY KEY,source_id TEXT,level INTEGER,name TEXT,name_zh TEXT,name_en TEXT,longitude REAL,latitude REAL,min_lon REAL,max_lon REAL,min_lat REAL,max_lat REAL,geometry_json TEXT)").execute(&pool).await.unwrap();
         sqlx::query(
             "CREATE VIRTUAL TABLE admin_bounds USING rtree(id,min_lon,max_lon,min_lat,max_lat)",
         )
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO admin_units VALUES(1,4,'Shaanxi','陕西','Shaanxi',108.9,34.3,105.0,111.0,31.0,39.0,'{\"type\":\"Polygon\",\"coordinates\":[]}')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO admin_units VALUES(1,'test/1',4,'Shaanxi','陕西','Shaanxi',108.9,34.3,105.0,111.0,31.0,39.0,'{\"type\":\"Polygon\",\"coordinates\":[]}')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO admin_bounds VALUES(1,105,111,31,39)")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO admin_units VALUES(2,3,'Macau','澳门','Macau',113.55,22.2,113.5,113.6,22.1,22.3,'{\"type\":\"Polygon\",\"coordinates\":[]}')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO admin_units VALUES(2,'test/2',3,'Macau','澳门','Macau',113.55,22.2,113.5,113.6,22.1,22.3,'{\"type\":\"Polygon\",\"coordinates\":[]}')").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO admin_bounds VALUES(2,113.5,113.6,22.1,22.3)")
             .execute(&pool)
             .await
             .unwrap();
-        let admin = SqliteAdmin { pool };
+        let admin = SqliteAdmin {
+            pool,
+            attribution: String::new(),
+        };
         assert_eq!(
             admin
                 .labels([108.0, 34.0, 110.0, 36.0], 4, "zh", 10)
@@ -206,5 +222,25 @@ mod tests {
                 .len(),
             1
         );
+        sqlx::query("INSERT INTO admin_units VALUES(3,'overlay/south-china-sea-dashes',2,'','',NULL,115,12,108,122,3,22,'{\"type\":\"MultiLineString\",\"coordinates\":[[[110,12],[111,11]]]}')")
+            .execute(&admin.pool).await.unwrap();
+        sqlx::query("INSERT INTO admin_bounds VALUES(3,108,122,3,22)")
+            .execute(&admin.pool)
+            .await
+            .unwrap();
+        assert!(admin
+            .labels([108.0, 10.0, 122.0, 20.0], 2, "zh", 10)
+            .await
+            .unwrap()
+            .is_empty());
+        for level in [2, 4] {
+            let lines = admin
+                .boundaries([108.0, 10.0, 122.0, 20.0], level, 10)
+                .await
+                .unwrap();
+            assert!(lines
+                .iter()
+                .any(|item| item.geometry["type"] == "MultiLineString"));
+        }
     }
 }

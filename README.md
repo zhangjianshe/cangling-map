@@ -119,9 +119,9 @@ GET /api/placenames/tiles/{z}/{x}/{y}?lang=zh
 [Natural Earth](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-populated-places/)
 （public domain）。
 
-## 中国 OSM 行政区划与地名
+## 中国行政区划与地名
 
-行政区划库使用 [Geofabrik 的中国 OpenStreetMap 提取文件](https://download.geofabrik.de/asia/china.html)构建。
+初始行政区划库使用 [Geofabrik 的中国 OpenStreetMap 提取文件](https://download.geofabrik.de/asia/china.html)构建。
 原始 PBF 和生成的 SQLite 库均不属于程序源码，放在 `data/osm/`、`data/admin.sqlite`，
 部署时挂载到容器 `/data/admin.sqlite`。Geofabrik 的区域 PBF 不含完整国界面，
 因此另取 OSM 中国关系 270056 的完整 XML。福建、海南、西藏的省级面及澳门的
@@ -161,14 +161,85 @@ GET /api/admin/tiles/{z}/{x}/{y}?lang=zh
 ```
 
 瓦片返回地名点 `features` 和 GeoJSON 边界 `boundaries`，坐标为 WGS84 经纬度。
-缩放级别 0–3 显示国界（OSM `admin_level=2`），4–6 省界（4，含澳门的 3），7–8 市级（5），
+缩放级别 0–3 显示国界，4–6 省界（含澳门特别行政区），7–8 市级，
 9–11 县界（6），12–14 乡镇界（8），15–20 村界及村庄点（10）。
-这是 OSM 社区数据，不是法定行政区划；全国范围尤其村界有覆盖缺口，
+未导入官方数据时，国、省、市界仍是 OSM 社区数据，不是法定行政区划；
+全国范围尤其村界有覆盖缺口，
 空瓦片不能解释为没有行政区划。接口及衍生数据库须保留
 [© OpenStreetMap contributors / ODbL 1.0](https://www.openstreetmap.org/copyright/All)
 署名与许可信息。数据库元数据记录快照、来源、许可、校验和、各级地名数量及
 实际可绘制的边界数量。2026-10-27 的中国区域快照包含 496,048 条村级名称，
 其中只有 9,407 条村级面边界；其余名称来自村庄和自然村点。
+
+### 国家基础地理信息中心公众版数据
+
+[全国 1:100 万公众版基础地理信息数据（2021）](https://www.webmap.cn/commres.do?method=result100W)
+提供包含台湾岛、南海诸岛的 77 幅 GDB，`BOUA` 为行政区面，`PAC` 为行政区划代码，
+`NAME` 为名称；数据整体现势性为 2019 年。官方下载入口已迁至
+[天地图数据中心](https://cloudcenter.tianditu.gov.cn/dataSource)，可能需要登录。
+下载并解压全部图幅后运行：
+
+```bash
+python3 tools/import-admin-ngcc.py \
+  --database data/admin.sqlite --output data/admin.sqlite \
+  --source-dir data/admin-source/ngcc-2021 --snapshot 2021
+```
+
+导入器会先读取全部 `BOUA`，按 `PAC` 合并跨图幅的面，生成国界、省界和市界，
+保留 OSM 的县、乡、村级数据。必须找到 34 个省级单位（包括台湾省）及至少 250 个
+市级单位，且国界范围通过完整性检查，才原子替换 SQLite；缺图幅时原库不变。
+接口元数据分别标记官方图幅与 OSM 图层的来源及快照。替换 SQLite 后重启
+`map-server`，使连接池和署名读取新库。CGCS2000 地理坐标在导入时转换为
+EPSG:4326，保留公众版原有的位置处理结果。
+
+目前官网入口在本机返回访问限制，尚未取得这 77 幅原始 GDB。基础 OSM 库可另外安装
+[GMT China](https://github.com/gmt-china/china-geospatial-data) 对上述公开数据的社区衍生成果；
+用于预览台湾省界与南海断续线。它们在数据库元数据里单独标记，不能称为
+国家基础地理信息中心直接发布的文件。
+预览源文件位于不入 Git 的 `data/admin-source/`，重建库后可重新安装。固定到
+GMT China 提交 `0214b4239c266f93e3a1273d7f2fad9a858012a5`：
+
+```bash
+mkdir -p data/admin-source
+curl -fL -o data/admin-source/ten-dash-line.gmt \
+  https://raw.githubusercontent.com/gmt-china/china-geospatial-data/0214b4239c266f93e3a1273d7f2fad9a858012a5/ten-dash-line.gmt
+curl -fL -o data/admin-source/CN-border-La.gmt \
+  https://raw.githubusercontent.com/gmt-china/china-geospatial-data/0214b4239c266f93e3a1273d7f2fad9a858012a5/CN-border-La.gmt
+python3 tools/import-admin-ngcc.py --database data/admin.sqlite \
+  --dash-gmt data/admin-source/ten-dash-line.gmt --dash-count 9 \
+  --taiwan-preview-gmt data/admin-source/CN-border-La.gmt
+```
+
+`--dash-count 9` 取传统九段线；源文件含第十段，需显示时可改为 `10`。
+
+### GitHub 镜像候选库
+
+官网不可访问时，可用 [GeoCode-Release 的中国行政区划镜像](https://github.com/zzhonglei/GeoCode-Release/tree/main/contributions/china-admin-boundaries/skill/data)
+构建**本地候选库**。仓库称其 GeoJSON 源于天地图，含 34 个省级、375 个市级、
+2891 个县级面；但没有原始下载包日期、原始校验值及原始数据的再分发条款，
+因此不能将这个镜像标为“最新官方数据”。市级文件中的台湾省为单个面，
+县级文件另有台湾的下级区划。南海断续线沿用单独署名的 GMT China 文件。
+
+```bash
+commit=6e3534f7af3675b19bd3c5d54c94022959dccdd2
+base="https://raw.githubusercontent.com/zzhonglei/GeoCode-Release/$commit/contributions/china-admin-boundaries/skill/data"
+mkdir -p data/admin-source/geocode
+for name in china_province china_city china_county; do
+  curl -fL -o "data/admin-source/geocode/${name}.geojson" "$base/${name}.geojson"
+done
+python3 tools/import-admin-geocode.py \
+  --database data/admin.sqlite --output data/admin.sqlite.github-candidate \
+  --source-dir data/admin-source/geocode --source-commit "$commit"
+```
+
+导入器校验要素数、行政代码、CRS84、几何有效性和台湾覆盖，在临时副本中替换
+国、省、市、县四级，再原子写出候选库。原库及 OSM 乡镇、村级记录不变。
+候选库在 `metadata` 中记录镜像提交、三个文件的 SHA-256、各级数量及来源限制。
+先用 `ADMIN_DATABASE_URL=sqlite://data/admin.sqlite.github-candidate?mode=ro`
+启动独立实例核对瓦片，再决定是否替换服务使用的库。
+
+公开展示或发布修改后的地图，应按[标准地图服务说明](https://bzdt.tianditu.gov.cn/)
+核对地图内容与审图要求；官方公开矢量数据本身不是已审定的成品地图。
 
 ## DEM 高程瓦片
 
