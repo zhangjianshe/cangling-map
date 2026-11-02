@@ -1,5 +1,5 @@
 document.head.append(Object.assign(document.createElement("script"),{src:window.__canglingUrl("/assets/service-frame.js")}));
-const $=q=>document.querySelector(q),pathParts=location.pathname.split("/").filter(Boolean),id=decodeURIComponent(pathParts[1]),isGroup=pathParts[0]==="layer-groups";
+const $=q=>document.querySelector(q),basePath=(window.__canglingBasePath||"").replace(/\/$/,""),resourcePath=basePath&&(location.pathname===basePath||location.pathname.startsWith(`${basePath}/`))?location.pathname.slice(basePath.length):location.pathname,pathParts=resourcePath.split("/").filter(Boolean),id=decodeURIComponent(pathParts[1]||""),isGroup=pathParts[0]==="layer-groups";
 let map,imageLayer,wmtsLayer,wmtsConfig,wmtsPixelRatio=0,layerExtent,mode="wms",styleScale={minimum:null,maximum:null};
 async function api(url){const r=await fetch(url);if(!r.ok){let b={};try{b=await r.json()}catch{}throw Error(b.error||`请求失败（${r.status}）`)}return r.json()}
 function text(q,v){$(q).textContent=v}
