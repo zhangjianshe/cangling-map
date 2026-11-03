@@ -35,6 +35,7 @@ use map_catalog::{
     PublishedLayer, SourceKind, SqliteAdmin, SqliteCatalog, SqlitePlaceNames, StyleRecord,
     StyleStore,
 };
+use map_imagery::{ImageryStore, LeaseSigner};
 use map_render::{
     blank_image, blank_png, FallbackRasterizerStats, FallbackVectorRasterizer,
     ImageFormat as RenderImageFormat, RasterizedRgba, VectorColor, VectorImageFill, VectorPaint,
@@ -61,6 +62,8 @@ use tower_http::{
 };
 
 mod administration;
+mod imagery;
+mod leadership;
 mod placenames;
 mod terrain;
 
@@ -69,6 +72,10 @@ static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>>
 #[derive(Clone)]
 struct AppState {
     catalog: SqliteCatalog,
+    imagery: ImageryStore,
+    imagery_lease_signer: LeaseSigner,
+    imagery_tile_client: imagery::ImageryTileClient,
+    imagery_leadership: leadership::MapLeadership,
     placenames: SqlitePlaceNames,
     administration: Option<SqliteAdmin>,
     wmts_cache: Arc<StdMutex<WmtsCache>>,
@@ -628,6 +635,34 @@ async fn main() -> anyhow::Result<()> {
     let catalog = SqliteCatalog::connect(&database_url)
         .await
         .context("failed to initialize catalog")?;
+    let imagery_database_url = std::env::var("IMAGERY_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://imagery.db?mode=rwc".into());
+    let imagery_index_database_url = std::env::var("IMAGERY_INDEX_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://imagery-index.db?mode=rwc".into());
+    let imagery =
+        ImageryStore::connect_with_index(&imagery_database_url, &imagery_index_database_url)
+            .await
+            .context("failed to initialize imagery repository")?;
+    let imagery_lease_secret = std::env::var("IMAGERY_LEASE_SECRET").unwrap_or_else(|_| {
+        tracing::warn!(
+            "IMAGERY_LEASE_SECRET is not configured; using a development-only lease key"
+        );
+        "cangling-map-development-imagery-lease-key".into()
+    });
+    let imagery_lease_signer = LeaseSigner::new(imagery_lease_secret)
+        .context("failed to configure imagery upload leases")?;
+    let imagery_tile_client = imagery::ImageryTileClient::from_env()
+        .map_err(anyhow::Error::msg)
+        .context("failed to configure imagery cangling-tile client")?;
+    let imagery_leadership = leadership::MapLeadership::from_env()
+        .map_err(anyhow::Error::msg)
+        .context("failed to configure imagery leader election")?;
+    imagery_leadership.start();
+    imagery_leadership.start_outbox_publisher(imagery.clone());
+    imagery_leadership.start_inbox_consumer(imagery.clone());
+    imagery_leadership.start_chunk_worker(imagery.clone(), imagery_tile_client.clone());
+    imagery_leadership.start_snapshot_sync(imagery.clone());
+    imagery_leadership.start_hybrid_takeover(imagery.clone());
     let placenames_url = std::env::var("PLACENAMES_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://data/placenames.sqlite?mode=ro".into());
     let placenames = SqlitePlaceNames::connect(&placenames_url)
@@ -673,6 +708,10 @@ async fn main() -> anyhow::Result<()> {
         configure_vector_rasterizer()?;
     let state = AppState {
         catalog,
+        imagery,
+        imagery_lease_signer,
+        imagery_tile_client,
+        imagery_leadership,
         placenames,
         administration,
         wmts_cache: Arc::new(StdMutex::new(active_wmts_cache)),
@@ -710,8 +749,23 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(metrics_page))
         .route("/catalog", get(index))
+        .route("/imagery", get(imagery_page))
+        .route(
+            "/imagery/repositories/{id}/preview",
+            get(imagery_preview_page),
+        )
         .route("/assets/styles.css", get(styles))
         .route("/assets/service-frame.js", get(service_frame_script))
+        .route(
+            "/assets/imagery-downloader.js",
+            get(imagery_downloader_script),
+        )
+        .route(
+            "/assets/imagery-download-worker.js",
+            get(imagery_download_worker_script),
+        )
+        .route("/assets/imagery.js", get(imagery_script))
+        .route("/assets/imagery-preview.js", get(imagery_preview_script))
         .route("/assets/app.js", get(script))
         .route("/published-layers", get(published_page))
         .route("/assets/published.js", get(published_script))
@@ -819,6 +873,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/styles/{id}",
             get(get_style).put(update_style).delete(delete_style),
         )
+        .merge(imagery::router())
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .with_state(state)
         .layer(TraceLayer::new_for_http());
@@ -1062,6 +1117,13 @@ fn management_page(template: &str, headers: &HeaderMap) -> Html<String> {
     let mut document = template
         .replace("{{MAP_VERSION}}", env!("CARGO_PKG_VERSION"))
         .replace("{{MAP_BUILD_DATE}}", env!("MAP_BUILD_DATE"));
+    if !document.contains("href=\"/imagery\"") {
+        document = document.replacen(
+            "▦ 数据目录</a>",
+            "▦ 数据目录</a><a href=\"/imagery\">▤ 影像仓库</a>",
+            1,
+        );
+    }
     if !prefix.is_empty() {
         document = document
             .replace("href=\"/", &format!("href=\"{prefix}/"))
@@ -1077,6 +1139,12 @@ fn management_page(template: &str, headers: &HeaderMap) -> Html<String> {
 }
 async fn index(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/index.html"), &headers)
+}
+async fn imagery_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/imagery.html"), &headers)
+}
+async fn imagery_preview_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/imagery-preview.html"), &headers)
 }
 async fn published_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/published.html"), &headers)
@@ -1756,6 +1824,30 @@ async fn service_frame_script() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../web/service-frame.js"),
+    )
+}
+async fn imagery_downloader_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/imagery-downloader.js"),
+    )
+}
+async fn imagery_download_worker_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/imagery-download-worker.js"),
+    )
+}
+async fn imagery_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/imagery.js"),
+    )
+}
+async fn imagery_preview_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/imagery-preview.js"),
     )
 }
 async fn published_script() -> impl IntoResponse {
@@ -4813,6 +4905,21 @@ mod tests {
         assert!(page.contains("href=\"/maps/geoserver/metrics\""));
         assert!(page.contains("src=\"/maps/geoserver/assets/app.js\""));
         assert!(page.contains("const prefix=\"/maps/geoserver\""));
+    }
+
+    #[test]
+    fn injects_imagery_navigation_before_rewriting_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-prefix",
+            axum::http::HeaderValue::from_static("/maps"),
+        );
+        let Html(page) = management_page(
+            r#"<html><head></head><body><nav><a href="/catalog">▦ 数据目录</a><a href="/styles">样式</a></nav></body></html>"#,
+            &headers,
+        );
+        assert!(page.contains("href=\"/maps/imagery\">▤ 影像仓库</a>"));
+        assert_eq!(page.matches("影像仓库</a>").count(), 1);
     }
 
     #[test]

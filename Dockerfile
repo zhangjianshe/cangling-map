@@ -55,6 +55,7 @@ USER cangling
 WORKDIR /data
 ENV MAP_SERVER_ADDRESS=0.0.0.0:3000 \
     CATALOG_DATABASE_URL=sqlite:///data/catalog.db?mode=rwc \
+    IMAGERY_DATABASE_URL=sqlite:///data/imagery.db?mode=rwc \
     PLACENAMES_DATABASE_URL=sqlite:///usr/share/cangling-map/placenames.sqlite?mode=ro \
     WMTS_CACHE_BACKEND=filesystem \
     MAP_CACHE_ROOT=/cache \

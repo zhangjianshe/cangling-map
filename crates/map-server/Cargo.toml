@@ -10,6 +10,7 @@ anyhow.workspace = true
 axum.workspace = true
 bytes.workspace = true
 cangling-gdal-core = { path = "../cangling-gdal-core" }
+futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -18,10 +19,12 @@ gdal = { git = "https://github.com/georust/gdal.git", rev = "c0a6266b987a2c2d44a
 map-catalog = { path = "../map-catalog" }
 map-core = { path = "../map-core" }
 map-gdal = { path = "../map-gdal" }
+map-imagery = { path = "../map-imagery" }
 map-render = { path = "../map-render" }
 map-style = { path = "../map-style" }
 ogc-wms = { path = "../ogc-wms" }
 ogc-wmts = { path = "../ogc-wmts" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

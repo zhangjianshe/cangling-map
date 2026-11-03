@@ -76,6 +76,8 @@ location ^~ /geoserver/ {
 | 用途 | 容器默认路径 | 配置项 |
 | --- | --- | --- |
 | SQLite 目录库 | `/data/catalog.db` | `CATALOG_DATABASE_URL` |
+| 影像仓库任务库 | `/data/imagery.db` | `IMAGERY_DATABASE_URL` |
+| 影像仓库位图库 | `/data/imagery-index.db` | `IMAGERY_INDEX_DATABASE_URL` |
 | 全球地名库 | `/usr/share/cangling-map/placenames.sqlite` | `PLACENAMES_DATABASE_URL` |
 | 中国 OSM 行政区划库 | `/data/admin.sqlite` | `ADMIN_DATABASE_URL` |
 | 样式图片 | `/data/style-assets` | `STYLE_ASSET_ROOT` |
@@ -91,6 +93,123 @@ location ^~ /geoserver/ {
 细粒度覆盖项；未设置时，分别使用 `MAP_CACHE_ROOT/wmts`、
 `MAP_CACHE_ROOT/vector-projection` 和 `MAP_CACHE_ROOT/gpu-mesh`。本地直接运行时，
 `MAP_CACHE_ROOT` 默认为当前目录下的 `cache`。
+
+## 影像仓库
+
+影像仓库由 `cangling-map` 管理元数据和任务，通过短期签名租约接收浏览器二进制
+上传，并同步写入 `cangling-tile`。详细架构、阶段和验收标准见
+[影像仓库重新设计开发计划](docs/imagery-repository-redesign-plan.md)。
+通用 Leader 选举协议和多语言示例见
+[通用 Leader 选举 API 使用说明](docs/leader-election-api.md)。
+
+影像 API 使用独立的 `IMAGERY_DATABASE_URL`，仓库稀疏位图使用
+`IMAGERY_INDEX_DATABASE_URL`（默认 `sqlite://imagery-index.db?mode=rwc`）。升级时会把
+旧 `imagery.db` 中的位图一次性迁入新数据库；完整页只保存 `full` 标记，不再保存
+4 KiB BLOB。迁移完成会删除旧表数据；已有大型数据库可在维护窗口执行一次 SQLite
+`VACUUM` 回收旧文件中的空闲页。多实例必须配置相同的
+`IMAGERY_LEASE_SECRET`（至少 24 字节）；生产环境应通过 Kubernetes Secret 注入。
+瓦片转发读取 `CANGLING_TILE_URL` 和 `CANGLING_TILE_AUTH_TOKEN`，同时兼容现有的
+`CANGLING_TILE_TOKEN`/`TILE_CACHE_TOKEN`。
+仓库列表中的浏览地址由 `CANGLING_TILE_PUBLIC_URL` 生成，默认使用反向代理前缀
+`/cangling-tile`；存储位置由 `CANGLING_TILE_STORAGE_ROOT` 生成，默认显示
+`/app/tiledata`。如果希望管理界面显示宿主机实际位置，可把后者设为 cangling-tile
+数据卷对应的 HostPath，例如 `/opt/cangling/local/tiledata`。这两个值仅用于展示，
+不会让 cangling-map 直接读写 cangling-tile 的目录。
+
+配置 `CANGLING_BROKER_HTTP_URL` 后，实例使用 Broker 的持久化租约选举影像仓库
+Master；未配置时保持单实例兼容模式。仓库、任务状态和上传租约等管理写操作只由
+当前 Master 接受，非 Master 返回 `503` 并携带当前领导状态。浏览器已持有签名租约
+时仍可把瓦片上传到任意实例。当前状态可通过以下接口查看：
+
+```text
+GET /api/imagery/leadership
+GET /api/imagery/worker-metrics
+GET /api/imagery/snapshot
+```
+
+第二个接口只由当前 Leader 返回元数据快照，内容包括仓库、任务、分片和 Outbox
+水位，不包含由 `cangling-tile` 保存的瓦片二进制。Broker 事件先写入本地 Inbox，
+应用成功后才 ACK，重复投递不会重复计数。Follower 周期性从当前 Leader 同步同一读
+事务生成的快照；导入前会核对 leader-id 与 fencing term，主从切换期间的旧快照会被
+丢弃。
+
+| 配置项 | 默认值 | 用途 |
+| --- | --- | --- |
+| `CANGLING_BROKER_HTTP_URL` | 未设置 | Broker 状态端口，例如 `http://cangling-broker:7501` |
+| `CANGLING_BROKER_AUTH_TOKEN` | 未设置 | Broker 机器接口 Bearer Token，也兼容 `CL_BROKER_AUTH_TOKEN` |
+| `CANGLING_MAP_INSTANCE_ID` | `HOSTNAME` | 唯一候选者 ID；StatefulSet 默认可直接使用 Pod 名称 |
+| `CANGLING_MAP_ELECTION` | `cangling-map/imagery-repository-master` | 选举名称 |
+| `CANGLING_MAP_ELECTION_TTL_SECONDS` | `15` | 选举租约秒数，服务按约三分之一周期续租 |
+| `CANGLING_MAP_PEER_URL_TEMPLATE` | `http://{leader}.cangling-map-headless:3000` | Follower 访问 Leader 的地址模板，必须包含 `{leader}` |
+| `CANGLING_MAP_SNAPSHOT_INTERVAL_SECONDS` | `10` | Follower 元数据快照同步周期 |
+| `CANGLING_MAP_CHUNK_TILES` | `512` | 每个服务端工作分片的最大瓦片数，范围 `1..65536` |
+| `CANGLING_MAP_IMAGERY_WORKER_CONCURRENCY` | `8` | 每个实例自适应并发上限，范围 `1..64` |
+| `CANGLING_MAP_IMAGERY_WORKER_MIN_CONCURRENCY` | `1` | 自适应并发下限，不得超过并发上限 |
+| `CANGLING_MAP_IMAGERY_TARGET_TILE_MS` | `500` | 期望单瓦片读取并写入耗时；用于自动升降并发 |
+| `CANGLING_MAP_IMAGERY_SOURCE_HOSTS` | 未设置 | 允许服务端下载的源主机，逗号分隔；未设置时安全地关闭服务端 Worker |
+| `CANGLING_MAP_HYBRID_TAKEOVER_SECONDS` | `120` | Hybrid 浏览器无心跳后的自动接管秒数；设为 `0` 可关闭 |
+| `CANGLING_TILE_PUBLIC_URL` | `/cangling-tile` | 仓库列表显示的公开 XYZ 浏览地址前缀 |
+| `CANGLING_TILE_STORAGE_ROOT` | `/app/tiledata` | 仓库列表显示的 cangling-tile 存储根目录 |
+
+任务创建时会把 Broker 的 fencing term 写入 `leader_term`。Broker 不可达且本地租约
+到期后，服务会自动停止管理写操作，防止网络分区产生双主。业务事务产生的 Outbox
+事件会以事件 ID 作为 Broker 幂等键重试发布；仓库变更和瓦片回执使用持久主题，UI
+进度使用临时广播主题。
+
+服务端任务由所有 map 实例共同竞争 `imagery.chunk.work`。Hybrid 任务先由浏览器处理，
+需要服务端接管时调用 `POST /api/imagery/jobs/{id}/takeover`；该操作只投递仍未处理的
+pending 分片，并可安全重复调用。接管需要配置 Broker，standalone 模式会返回冲突错误。
+浏览器应定期调用 `POST /api/imagery/jobs/{id}/heartbeat`；默认连续 120 秒无心跳或瓦片
+进度时由当前 Leader 自动接管。
+任务页面可使用 `EventSource` 连接 `GET /api/imagery/jobs/{id}/events`。服务立即推送
+`progress` 事件，内容包含完整 Job、按状态汇总的分片数量和最后分片更新时间；状态进入
+`completed`、`failed` 或 `cancelled` 时发送 `terminal` 事件并结束连接。连接保持期间每
+15 秒发送 keep-alive，断线重连后重新发送完整快照，因此不要求客户端补拉中间事件。
+
+内置浏览器下载器由 `/assets/imagery-downloader.js` 和同源 Web Worker
+`/assets/imagery-download-worker.js` 组成。它分页读取任务分片，每页申请独立短期租约，
+并发从源站取得二进制瓦片后直接 PUT 到 Map；单瓦片失败最多重试 3 次。源瓦片服务必须
+允许当前管理页面来源执行 CORS GET。基本用法：
+
+```html
+<script src="/assets/imagery-downloader.js"></script>
+<script>
+const downloader = new CanglingImageryDownloader({
+  jobId: "任务 ID",
+  concurrency: 4,
+  pageSize: 20
+});
+downloader.addEventListener("tileprogress", event => console.log(event.detail));
+downloader.addEventListener("jobprogress", event => console.log(event.detail.job));
+downloader.addEventListener("error", event => console.error(event.detail.error));
+downloader.start();
+// downloader.pause(); downloader.resume(); downloader.cancel();
+</script>
+```
+
+`GET /api/imagery/jobs/{id}/chunks?page=1&page_size=100&status=pending` 返回标准分页对象，
+每页允许 5–500 条，浏览器下载器不会一次加载整个大任务。
+每页上传结束后，下载器使用同一租约调用
+`POST /api/imagery/jobs/{id}/chunks/{chunk_id}/complete`。Leader 仅在分片坐标范围内的
+TileReceipt 数量与预期完全一致时接受完成回执；Broker 结果尚未同步完成时，浏览器会对
+`409`/`503` 自动退避重试。重复完成请求是幂等的。
+
+Worker 处理较长分片时会续租 Broker 消息，下载后先校验图片类型和大小，再写入
+`cangling-tile`；完成结果通过持久化 Outbox 返回 Leader。暂停期间 Worker 保持续租并
+等待恢复，取消后会直接确认过期工作而不再下载。生产环境必须显式设置来源白名单，例如：
+
+```bash
+CANGLING_MAP_IMAGERY_SOURCE_HOSTS=tiles.internal.example,imagery.example.com
+```
+
+`GET /api/imagery/leadership` 的 `worker` 字段提供当前实例的启用状态、并发上下限、
+当前有效并发、平均瓦片耗时、活动/完成分片、失败尝试和处理瓦片数。Worker 每 16 个
+成功样本以加法方式提升或降低并发；请求失败时立即将并发减半，最低不低于配置下限。
+`GET /api/imagery/worker-metrics` 额外返回最近 120 个进程内采样点；运行期间至少每 5 秒
+采样一次，并在分片结束时立即采样，适合指标页面绘制短时趋势。该历史不写入 SQLite，
+服务重启后重新开始。
+Broker 达到最后一次投递后，Worker 会发布持久化
+`imagery.chunk.failed`，Leader 幂等地把分片转为失败状态并记录剩余失败瓦片。
 
 ## 地名标注数据
 
@@ -420,6 +539,7 @@ services:
       - "3000:3000"
     environment:
       CATALOG_DATABASE_URL: sqlite:///data/catalog.db?mode=rwc
+      IMAGERY_DATABASE_URL: sqlite:///data/imagery.db?mode=rwc
       WMTS_CACHE_BACKEND: filesystem
       MAP_CACHE_ROOT: /cache
     volumes:

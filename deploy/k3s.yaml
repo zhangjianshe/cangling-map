@@ -13,18 +13,10 @@ stringData:
   # 部署前必须替换；两个服务通过同一个 Token 进行瓦片写入鉴权。
   auth-token: replace-with-a-long-random-token
   admin-password: replace-with-a-strong-admin-password
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: cangling-map-data
-  namespace: cangling-map
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 5Gi
+  # 所有 cangling-map 实例必须使用同一个签名密钥，至少 24 字节。
+  imagery-lease-secret: replace-with-a-long-random-imagery-lease-secret
+  # 必须与单实例 cangling-broker 的 CL_BROKER_AUTH_TOKEN 相同。
+  broker-auth-token: replace-with-the-cangling-broker-service-token
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -195,10 +187,52 @@ spec:
               value: 0.0.0.0:3000
             - name: CATALOG_DATABASE_URL
               value: sqlite:///data/catalog.db?mode=rwc
+            - name: IMAGERY_DATABASE_URL
+              value: sqlite:///data/imagery.db?mode=rwc
+            - name: IMAGERY_INDEX_DATABASE_URL
+              value: sqlite:///data/imagery-index.db?mode=rwc
+            - name: IMAGERY_LEASE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cangling-tile-credentials
+                  key: imagery-lease-secret
+            - name: CANGLING_BROKER_HTTP_URL
+              # 按实际部署命名空间修改；Broker 必须保持单实例。
+              value: http://cangling-broker.cangling.svc.cluster.local:7501
+            - name: CANGLING_BROKER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cangling-tile-credentials
+                  key: broker-auth-token
+            - name: CANGLING_MAP_ELECTION
+              value: cangling-map/imagery-repository-master
+            - name: CANGLING_MAP_ELECTION_TTL_SECONDS
+              value: "15"
+            - name: CANGLING_MAP_PEER_URL_TEMPLATE
+              value: http://{leader}.cangling-map-headless:3000
+            - name: CANGLING_MAP_SNAPSHOT_INTERVAL_SECONDS
+              value: "10"
+            - name: CANGLING_MAP_CHUNK_TILES
+              value: "512"
+            - name: CANGLING_MAP_IMAGERY_WORKER_CONCURRENCY
+              value: "8"
+            - name: CANGLING_MAP_IMAGERY_WORKER_MIN_CONCURRENCY
+              value: "1"
+            - name: CANGLING_MAP_IMAGERY_TARGET_TILE_MS
+              value: "500"
+            - name: CANGLING_MAP_HYBRID_TAKEOVER_SECONDS
+              value: "120"
+            # 逗号分隔的可信瓦片源主机；空值会关闭服务端影像下载 Worker。
+            - name: CANGLING_MAP_IMAGERY_SOURCE_HOSTS
+              value: ""
             - name: WMTS_CACHE_BACKEND
               value: cangling-tile
             - name: CANGLING_TILE_URL
               value: http://cangling-tile:7601
+            - name: CANGLING_TILE_PUBLIC_URL
+              value: /cangling-tile
+            - name: CANGLING_TILE_STORAGE_ROOT
+              value: /app/tiledata
             - name: CANGLING_TILE_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -241,9 +275,6 @@ spec:
               mountPath: /opt/cis/core/geoserver/data
               readOnly: true
       volumes:
-        - name: map-data
-          persistentVolumeClaim:
-            claimName: cangling-map-data
         - name: map-cache
           emptyDir: {}
         - name: geodata
@@ -251,3 +282,14 @@ spec:
             # 修改为 K3s 节点上的实际地图源数据目录。
             path: /opt/cis/core/geoserver/data
             type: Directory
+  volumeClaimTemplates:
+    # 每个 Pod 使用独立本地 SQLite。Broker 事件与快照负责同步；
+    # 不要让多个 Pod 直接并发打开同一个 SQLite 文件。
+    - metadata:
+        name: map-data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi
