@@ -82,8 +82,8 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha,scope=cangling-map-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cangling-map-${{ matrix.arch }}
-          provenance: mode=max
-          sbom: true
+          provenance: ${{ (github.event_name != 'workflow_dispatch' || !inputs.smoke_only) && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'workflow_dispatch' || !inputs.smoke_only }}
 
 
       - name: Verify native image runtime and rendering
@@ -91,6 +91,7 @@ jobs:
         run: |
           image="${IMAGE}:${{ needs.metadata.outputs.version }}-${{ matrix.arch }}"
           if [[ "${{ inputs.smoke_only }}" != "true" ]]; then docker pull "$image"; fi
+          docker image inspect "$image" --format 'Architecture={{.Architecture}} Size={{.Size}}'
           docker run --rm --entrypoint /bin/sh "$image" -ec '
             gdalinfo --version
             test -r "$MAP_FONT_PATH"
