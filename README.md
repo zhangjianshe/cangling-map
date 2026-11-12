@@ -722,11 +722,29 @@ kubectl -n cangling-map get pods,svc,pvc
 ghcr.io/osgeo/gdal:ubuntu-small-3.13.0
 ```
 
+Dockerfile 固定此版本的多架构摘要，支持 `linux/amd64` 和 `linux/arm64`。
+编译和运行阶段使用相同 GDAL 基础环境。运行层补充 `fontconfig`、`libvulkan1`、
+HDF5/NetCDF 动态库，只复制 Noto CJK Regular 字体及其许可证。
+由于官方 ubuntu-small 未内置 HDF5/NetCDF，本镜像从校验过的 GDAL 3.13.0 源码
+构建这两个驱动插件并放入 `/usr/lib/gdalplugins`；原 GDAL 核心保持不变。
+构建工具、开发头文件、临时 GDAL 核心、Rust 工具链和其余字体留在构建阶段。
+容器验证会实际生成并读取 NetCDF4/HDF5 文件，同时测试 GeoTIFF、Shapefile 和中文标注出图。
+
 本地构建：
 
 ```bash
 docker buildx build -t cangling-map:local .
 ```
+
+单架构构建及实际出图验证（ARM64 将两处 `amd64` 替换为 `arm64`）：
+
+```bash
+docker buildx build --platform linux/amd64 --load -t cangling-map:test-amd64 .
+python3 scripts/test-named-styles.py --image cangling-map:test-amd64 --platform linux/amd64
+```
+
+发布流程在各架构原生 runner 上执行动态库、字体和 WMS/WMTS 出图验证，
+两种架构都通过后才发布多架构标签。
 
 发布镜像：
 

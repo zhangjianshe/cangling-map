@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise named styles against an isolated local server (cargo build -p map-server first)."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,15 @@ WORLD = '-20037508.342789244,-20037508.342789244,20037508.342789244,20037508.342
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--image', help='Test a Docker image instead of the local binary')
+    parser.add_argument('--platform', choices=['linux/amd64', 'linux/arm64'])
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='map-named-styles-') as temp:
         root = Path(temp)
+        if args.image:
+            # The image runs as UID 10001. Keep this disposable fixture writable.
+            root.chmod(0o777)
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
@@ -43,8 +51,20 @@ def main():
                 return json.loads(body) if 'json' in response.headers.get('Content-Type', '') else body
 
         def start(log):
-            process = subprocess.Popen([str(BINARY)], cwd=root, env=env, stdout=log, stderr=log)
-            for _ in range(100):
+            command = [str(BINARY)]
+            if args.image:
+                command = ['docker', 'run', '--rm', '--pull=never',
+                           '--name', root.name, '-p', f'127.0.0.1:{port}:3000',
+                           '-v', f'{root}:{root}', '--workdir', str(root)]
+                if args.platform:
+                    command += ['--platform', args.platform]
+                for key in ('CATALOG_DATABASE_URL', 'IMAGERY_DATABASE_URL',
+                            'IMAGERY_INDEX_DATABASE_URL', 'PLACENAMES_DATABASE_URL',
+                            'WMTS_CACHE_BACKEND', 'WMTS_CACHE_PATH'):
+                    command += ['-e', key + '=' + env[key]]
+                command += ['-e', 'MAP_SERVER_ADDRESS=0.0.0.0:3000', args.image]
+            process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=log)
+            for _ in range(600):
                 try:
                     request('/api/styles')
                     return process
@@ -56,13 +76,67 @@ def main():
             process.wait()
             raise RuntimeError('server did not start')
 
+        def stop(process):
+            if args.image:
+                subprocess.run(['docker', 'rm', '-f', root.name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                process.terminate()
+            process.wait(timeout=30)
+
         with (root / 'server.log').open('w+') as log:
             process = start(log)
             try:
                 source = root / 'polygon.geojson'
                 source.write_text(json.dumps({'type': 'FeatureCollection', 'features': [{
-                    'type': 'Feature', 'properties': {}, 'geometry': {'type': 'Polygon',
+                    'type': 'Feature', 'properties': {'name': '中国'}, 'geometry': {'type': 'Polygon',
                     'coordinates': [[[-120, 20], [-80, 20], [-80, 40], [-120, 40], [-120, 20]]]}}]}))
+                raster_fixtures = {}
+                if args.image:
+                    command = ['docker', 'run', '--rm', '--pull=never', '-v', f'{root}:{root}']
+                    if args.platform:
+                        command += ['--platform', args.platform]
+                    subprocess.check_call(command + ['--entrypoint', 'python3', args.image, '-c', r'''
+import json, sys
+from pathlib import Path
+from osgeo import gdal, ogr, osr
+gdal.UseExceptions()
+root = Path(sys.argv[1])
+for name in ('GTiff', 'VRT', 'HDF5', 'HDF5Image', 'netCDF'):
+    assert gdal.GetDriverByName(name), 'Missing raster driver: ' + name
+for name in ('ESRI Shapefile', 'GeoJSON', 'PostgreSQL'):
+    assert ogr.GetDriverByName(name), 'Missing vector driver: ' + name
+shape = gdal.VectorTranslate(str(root / 'polygon.shp'), str(root / 'polygon.geojson'),
+    format='ESRI Shapefile', layerCreationOptions=['ENCODING=UTF-8'])
+assert shape is not None
+shape = None
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(4326)
+tiff = gdal.GetDriverByName('GTiff').Create(str(root / 'raster.tif'), 8, 8, 1, gdal.GDT_Byte)
+tiff.SetGeoTransform([-120, 5, 0, 40, 0, -2.5])
+tiff.SetProjection(srs.ExportToWkt())
+tiff.GetRasterBand(1).Fill(128)
+tiff = None
+netcdf = gdal.GetDriverByName('netCDF').CreateCopy(str(root / 'raster.nc'),
+    gdal.Open(str(root / 'raster.tif')), options=['FORMAT=NC4'])
+assert netcdf is not None
+netcdf = None
+hdf = gdal.OpenEx(str(root / 'raster.nc'), allowed_drivers=['HDF5'])
+assert hdf is not None
+subdatasets = hdf.GetSubDatasets()
+image = gdal.Open(subdatasets[0][0]) if subdatasets else hdf
+assert image.ReadRaster(), 'HDF5 dataset is unreadable'
+# Generic HDF5 arrays need georeferencing; use a VRT to provide it explicitly.
+vrt = gdal.Translate(str(root / 'hdf5.vrt'), image, format='VRT',
+    outputSRS='EPSG:4326', outputBounds=[-120, 40, -80, 20])
+assert vrt is not None
+vrt = None
+(root / 'raster-fixtures.json').write_text(json.dumps({
+    'geotiff': str(root / 'raster.tif'), 'netcdf': str(root / 'raster.nc'),
+    'hdf5': str(root / 'hdf5.vrt')}))
+''', str(root)])
+                    source = root / 'polygon.shp'
+                    raster_fixtures = json.loads((root / 'raster-fixtures.json').read_text())
                 item = request('/api/catalog', dict(app_id='ai', catalog_path='/test', title='Test',
                     description=None, source_kind='vector', source_config={'path': str(source)},
                     native_crs='EPSG:4326', native_extent=dict(min_x=-120, min_y=20, max_x=-80, max_y=40), attribution=None))
@@ -91,6 +165,21 @@ def main():
                     result = request('/ai/wms?' + urlencode(query))
                     assert result.startswith(b'\x89PNG'), result[:200]
                     return result
+
+                for name, path in raster_fixtures.items():
+                    raster_item = request('/api/catalog', dict(app_id='ai', catalog_path='/' + name,
+                        title=name, description=None, source_kind='raster', source_config={'path': path},
+                        native_crs='EPSG:4326', native_extent=dict(min_x=-120, min_y=20, max_x=-80, max_y=40),
+                        attribution=None))
+                    request('/api/published-layers', dict(layer, id='', name=name,
+                        catalog_item_id=raster_item['id'], default_style_id=None))
+                    wms(name, '', False)
+                    wms(name, '', True)
+                if args.image:
+                    labeled = style('labeled', '#ff0000')
+                    labeled['source_text'] += " * { label: [name]; font-family: 'Noto Sans CJK SC'; font-size: 18px; font-fill: #000000; }"
+                    request('/api/styles', labeled)
+                    assert wms('polygon', 'labeled') != wms('polygon', 'red'), 'Chinese labels were not rendered'
 
                 for tiled in (False, True):
                     default = wms('polygon', '', tiled)
@@ -128,16 +217,23 @@ def main():
                     raise AssertionError('missing member style was accepted')
                 except HTTPError as error:
                     assert error.code == 422
-                process.terminate()
-                process.wait(timeout=10)
+                stop(process)
                 process = start(log)
                 saved = request('/api/layer-groups')
                 assert next(g for g in saved if g['id'] == group['id'])['named_styles'] == group['named_styles']
                 assert wms('china', '', True) != wms('china', 'china_dark', True)
                 print('PASS: named WMS/tiled WMS/WMTS, fallback, workspace isolation, capabilities, style cache revisions, persistence')
+                if args.image:
+                    print('PASS: Shapefile, Chinese labels, GeoTIFF, HDF5 and NetCDF file reading and WMS rendering')
             finally:
-                process.terminate()
-                process.wait(timeout=10)
+                stop(process)
+                if args.image:
+                    cleanup = ['docker', 'run', '--rm', '--pull=never', '--user', '0',
+                               '--entrypoint', '/bin/sh', '-v', f'{root}:/test-fixture']
+                    if args.platform:
+                        cleanup += ['--platform', args.platform]
+                    subprocess.run(cleanup + [args.image, '-c', 'chmod -R a+rwX /test-fixture'],
+                                   check=True, stdout=subprocess.DEVNULL)
 
 
 if __name__ == '__main__':
