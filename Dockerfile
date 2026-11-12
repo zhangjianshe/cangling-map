@@ -26,6 +26,37 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
     && test -r /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
     && rm -rf /var/lib/apt/lists/*
 
+# Rebuild only the missing drivers from the exact GDAL release. Their build
+# dependencies and temporary GDAL core stay outside the runtime image.
+FROM runtime-base AS gdal-drivers
+RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        g++ make cmake curl pkg-config libproj-dev libhdf5-dev libnetcdf-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY \
+    && test "$(gdal-config --version)" = "3.13.0" \
+    && curl --fail --location --retry 3 https://github.com/OSGeo/gdal/releases/download/v3.13.0/gdal-3.13.0.tar.gz -o /tmp/gdal.tar.gz \
+    && echo '1eb8c56a8cea4d3c733d90a719540c1aab981e4eb15e03057092e69b2935ae73  /tmp/gdal.tar.gz' | sha256sum -c - \
+    && mkdir /tmp/gdal-source \
+    && tar -xzf /tmp/gdal.tar.gz -C /tmp/gdal-source --strip-components=1 \
+    && cmake -S /tmp/gdal-source -B /tmp/gdal-build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_SKIP_RPATH=ON \
+        -DBUILD_APPS=OFF -DBUILD_TESTING=OFF \
+        -DBUILD_PYTHON_BINDINGS=OFF -DBUILD_JAVA_BINDINGS=OFF -DBUILD_CSHARP_BINDINGS=OFF \
+        -DGDAL_BUILD_OPTIONAL_DRIVERS=OFF -DOGR_BUILD_OPTIONAL_DRIVERS=OFF \
+        -DGDAL_ENABLE_DRIVER_HDF5=ON -DGDAL_ENABLE_DRIVER_HDF5_PLUGIN=ON \
+        -DGDAL_ENABLE_DRIVER_NETCDF=ON -DGDAL_ENABLE_DRIVER_NETCDF_PLUGIN=ON \
+        -DGDAL_USE_HDF5=ON -DGDAL_USE_NETCDF=ON \
+    && cmake --build /tmp/gdal-build --target gdal_HDF5 gdal_netCDF --parallel 4 \
+    && mkdir -p /out/gdalplugins \
+    && find /tmp/gdal-build -name 'gdal_HDF5.so' -exec cp '{}' /out/gdalplugins/ \; \
+    && find /tmp/gdal-build -name 'gdal_netCDF.so' -exec cp '{}' /out/gdalplugins/ \; \
+    && test -s /out/gdalplugins/gdal_HDF5.so \
+    && test -s /out/gdalplugins/gdal_netCDF.so \
+    && strip /out/gdalplugins/*.so \
+    && cp /tmp/gdal-source/LICENSE.TXT /out/GDAL-LICENSE.TXT
+
 FROM runtime-base AS builder
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY \
     && apt-get update \
@@ -40,9 +71,9 @@ ENV PATH=/usr/local/cargo/bin:${PATH} \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
     CARGO_NET_RETRY=5 \
     CARGO_HTTP_MULTIPLEXING=false
-WORKDIR /workspace
-COPY . /workspace/cangling-map
 WORKDIR /workspace/cangling-map
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 # Separate native and emulated architecture caches when building both platforms.
 ARG TARGETARCH
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -53,6 +84,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/map-server /usr/local/bin/cangling-map
 
 FROM runtime-base
+RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libhdf5-310 libnetcdf22 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=gdal-drivers /out/gdalplugins/ /usr/lib/gdalplugins/
+COPY --from=gdal-drivers /out/GDAL-LICENSE.TXT /usr/share/doc/cangling-map/GDAL-plugins-LICENSE.TXT
+ENV GDAL_DRIVER_PATH=/usr/lib/gdalplugins
 COPY --from=fonts /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 COPY --from=fonts /usr/share/doc/fonts-noto-cjk/copyright /usr/share/doc/fonts-noto-cjk/copyright
 RUN fc-cache -f \

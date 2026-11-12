@@ -89,8 +89,54 @@ def main():
             try:
                 source = root / 'polygon.geojson'
                 source.write_text(json.dumps({'type': 'FeatureCollection', 'features': [{
-                    'type': 'Feature', 'properties': {}, 'geometry': {'type': 'Polygon',
+                    'type': 'Feature', 'properties': {'name': '中国'}, 'geometry': {'type': 'Polygon',
                     'coordinates': [[[-120, 20], [-80, 20], [-80, 40], [-120, 40], [-120, 20]]]}}]}))
+                raster_fixtures = {}
+                if args.image:
+                    command = ['docker', 'run', '--rm', '--pull=never', '-v', f'{root}:{root}']
+                    if args.platform:
+                        command += ['--platform', args.platform]
+                    subprocess.check_call(command + ['--entrypoint', 'python3', args.image, '-c', r'''
+import json, sys
+from pathlib import Path
+from osgeo import gdal, ogr, osr
+gdal.UseExceptions()
+root = Path(sys.argv[1])
+for name in ('GTiff', 'VRT', 'HDF5', 'HDF5Image', 'netCDF'):
+    assert gdal.GetDriverByName(name), 'Missing raster driver: ' + name
+for name in ('ESRI Shapefile', 'GeoJSON', 'PostgreSQL'):
+    assert ogr.GetDriverByName(name), 'Missing vector driver: ' + name
+shape = gdal.VectorTranslate(str(root / 'polygon.shp'), str(root / 'polygon.geojson'),
+    format='ESRI Shapefile', layerCreationOptions=['ENCODING=UTF-8'])
+assert shape is not None
+shape = None
+srs = osr.SpatialReference()
+srs.ImportFromEPSG(4326)
+tiff = gdal.GetDriverByName('GTiff').Create(str(root / 'raster.tif'), 8, 8, 1, gdal.GDT_Byte)
+tiff.SetGeoTransform([-120, 5, 0, 40, 0, -2.5])
+tiff.SetProjection(srs.ExportToWkt())
+tiff.GetRasterBand(1).Fill(128)
+tiff = None
+netcdf = gdal.GetDriverByName('netCDF').CreateCopy(str(root / 'raster.nc'),
+    gdal.Open(str(root / 'raster.tif')), options=['FORMAT=NC4'])
+assert netcdf is not None
+netcdf = None
+hdf = gdal.OpenEx(str(root / 'raster.nc'), allowed_drivers=['HDF5'])
+assert hdf is not None
+subdatasets = hdf.GetSubDatasets()
+image = gdal.Open(subdatasets[0][0]) if subdatasets else hdf
+assert image.ReadRaster(), 'HDF5 dataset is unreadable'
+# Generic HDF5 arrays need georeferencing; use a VRT to provide it explicitly.
+vrt = gdal.Translate(str(root / 'hdf5.vrt'), image, format='VRT',
+    outputSRS='EPSG:4326', outputBounds=[-120, 40, -80, 20])
+assert vrt is not None
+vrt = None
+(root / 'raster-fixtures.json').write_text(json.dumps({
+    'geotiff': str(root / 'raster.tif'), 'netcdf': str(root / 'raster.nc'),
+    'hdf5': str(root / 'hdf5.vrt')}))
+''', str(root)])
+                    source = root / 'polygon.shp'
+                    raster_fixtures = json.loads((root / 'raster-fixtures.json').read_text())
                 item = request('/api/catalog', dict(app_id='ai', catalog_path='/test', title='Test',
                     description=None, source_kind='vector', source_config={'path': str(source)},
                     native_crs='EPSG:4326', native_extent=dict(min_x=-120, min_y=20, max_x=-80, max_y=40), attribution=None))
@@ -119,6 +165,21 @@ def main():
                     result = request('/ai/wms?' + urlencode(query))
                     assert result.startswith(b'\x89PNG'), result[:200]
                     return result
+
+                for name, path in raster_fixtures.items():
+                    raster_item = request('/api/catalog', dict(app_id='ai', catalog_path='/' + name,
+                        title=name, description=None, source_kind='raster', source_config={'path': path},
+                        native_crs='EPSG:4326', native_extent=dict(min_x=-120, min_y=20, max_x=-80, max_y=40),
+                        attribution=None))
+                    request('/api/published-layers', dict(layer, id='', name=name,
+                        catalog_item_id=raster_item['id'], default_style_id=None))
+                    wms(name, '', False)
+                    wms(name, '', True)
+                if args.image:
+                    labeled = style('labeled', '#ff0000')
+                    labeled['source_text'] += " * { label: [name]; font-family: 'Noto Sans CJK SC'; font-size: 18px; font-fill: #000000; }"
+                    request('/api/styles', labeled)
+                    assert wms('polygon', 'labeled') != wms('polygon', 'red'), 'Chinese labels were not rendered'
 
                 for tiled in (False, True):
                     default = wms('polygon', '', tiled)
@@ -162,6 +223,8 @@ def main():
                 assert next(g for g in saved if g['id'] == group['id'])['named_styles'] == group['named_styles']
                 assert wms('china', '', True) != wms('china', 'china_dark', True)
                 print('PASS: named WMS/tiled WMS/WMTS, fallback, workspace isolation, capabilities, style cache revisions, persistence')
+                if args.image:
+                    print('PASS: Shapefile, Chinese labels, GeoTIFF, HDF5 and NetCDF file reading and WMS rendering')
             finally:
                 stop(process)
                 if args.image:
