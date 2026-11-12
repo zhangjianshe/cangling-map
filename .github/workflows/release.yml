@@ -134,3 +134,49 @@ jobs:
         shell: bash
         run: |
           docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.version }}"
+
+      - name: Export and upload offline images to soft.cangling.cn
+        env:
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          CANGLING_TOKEN: ${{ secrets.CANGLING_TOKEN }}
+          DATASET_TOKEN: e2a964ab97c0422d9a2000bffff4fb1b
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${CANGLING_TOKEN:?Configure the CANGLING_TOKEN repository secret before publishing to soft.cangling.cn}"
+          mkdir -p dist
+
+          upload_file() {
+            local filename="$1" arch="$2"
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 1800 \
+              "https://soft.cangling.cn:22002/api/v1/software/upload" \
+              -H "API-TOKEN: ${CANGLING_TOKEN}" \
+              -F "token=${DATASET_TOKEN}" \
+              -F "version=latest" \
+              -F "name=cangling-map" \
+              -F "summary=cangling-map v${RELEASE_VERSION}" \
+              -F "os=linux" \
+              -F "arch=${arch}" \
+              -F "file=@dist/${filename}"
+          }
+
+          # Export sequentially: both architectures use the same offline image tag.
+          # Keep archive filenames stable so clients can download from /latest/.
+          offline_image="hub.cangling.cn/cangling/cangling-map:${RELEASE_VERSION}"
+          for arch in amd64 arm64; do
+            source_image="${IMAGE}:${RELEASE_VERSION}-${arch}"
+            filename="cangling-map-linux-${arch}.tar.gz"
+            docker pull --platform "linux/${arch}" "$source_image"
+            actual_arch="$(docker image inspect "$source_image" --format '{{.Architecture}}')"
+            test "$actual_arch" = "$arch"
+            docker tag "$source_image" "$offline_image"
+            docker save "$offline_image" | gzip -n > "dist/${filename}"
+            (cd dist && sha256sum "$filename" > "${filename}.sha256")
+            upload_file "$filename" "$arch"
+            upload_file "${filename}.sha256" "$arch"
+          done
+
+          # Update the advertised version only after both archives and checksums upload.
+          printf 'v%s\n' "$RELEASE_VERSION" > dist/version.txt
+          upload_file version.txt amd64

@@ -41,3 +41,21 @@
 5. 最后创建或更新 `ai:china` 图层组。
 
 依赖：`bash`、`curl`、`jq`、`base64`。写入系统数据目录时，执行用户必须具有相应权限。
+
+### Kylin 主机离线导入
+
+如果 Shape 文件已经复制到宿主机，且没有安装 `jq`，可使用仅依赖 Python 3
+标准库的 `import.py`。例如，宿主机目录
+`/opt/cl/local/cangling/cangling-map/geodata/china` 挂载到容器内的
+`/geodata/china` 时，在宿主机运行：
+
+```bash
+MAP_URL=http://10.43.227.236:3000  # 替换为当前集群的 cangling-map ClusterIP
+python3 import.py "$MAP_URL" /geodata/china \
+  --skip-copy \
+  --host-data-dir /opt/cl/local/cangling/cangling-map/geodata/china
+```
+
+`--host-data-dir` 用于检查五份 Shapefile 及其 `.dbf`、`.shx`、`.prj` 配套文件；
+写入目录项的路径仍是容器内可见的 `/geodata/china`。重复执行会更新同名配置，
+不会重复创建图层。
