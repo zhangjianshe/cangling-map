@@ -271,6 +271,8 @@ pub struct LayerGroup {
     pub description: Option<String>,
     pub enabled: bool,
     pub members: Vec<LayerGroupMember>,
+    #[serde(default)]
+    pub named_styles: std::collections::BTreeMap<String, Vec<LayerGroupMember>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -489,6 +491,7 @@ struct PublishedRow {
 
 #[derive(FromRow)]
 struct LayerGroupRow {
+    named_styles: String,
     id: String,
     app_id: String,
     name: String,
@@ -594,7 +597,7 @@ impl PublicationStore for SqliteCatalog {
     }
     async fn list_layer_groups(&self) -> Result<Vec<LayerGroup>, CatalogError> {
         let rows = sqlx::query_as::<_, LayerGroupRow>(
-            "SELECT id,app_id,name,title,description,enabled FROM layer_groups ORDER BY app_id,name",
+            "SELECT id,app_id,name,title,description,enabled,named_styles FROM layer_groups ORDER BY app_id,name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -618,6 +621,7 @@ impl PublicationStore for SqliteCatalog {
             })
             .collect();
             groups.push(LayerGroup {
+                named_styles: serde_json::from_str(&row.named_styles)?,
                 id: row.id,
                 app_id: row.app_id,
                 name: row.name,
@@ -644,33 +648,47 @@ impl PublicationStore for SqliteCatalog {
         }
         let id = LayerGroup::derive_id(&group.app_id, &group.name)?;
         let mut seen = std::collections::HashSet::new();
-        for member in &group.members {
-            if !seen.insert(&member.published_layer_id) {
-                return Err(CatalogError::InvalidData(
-                    "图层组中不能重复添加同一图层".into(),
-                ));
-            }
-            if self
-                .get_published_layer(&member.published_layer_id)
-                .await?
-                .is_none()
+        for name in group.named_styles.keys() {
+            if name.trim().is_empty()
+                || name.trim() != name
+                || name.eq_ignore_ascii_case("default")
+                || name.contains([',', ':'])
             {
-                return Err(CatalogError::NotFound(member.published_layer_id.clone()));
-            }
-            if !member.opacity.is_finite() || !(0.0..=1.0).contains(&member.opacity) {
                 return Err(CatalogError::InvalidData(
-                    "图层组成员透明度必须位于 0 到 1 之间".into(),
+                    "命名样式名称不能为空、default 或包含逗号、冒号".into(),
                 ));
             }
-            if let Some(style_id) = member.style_id.as_deref() {
-                if self.get_style(style_id).await?.is_none() {
-                    return Err(CatalogError::NotFound(style_id.to_owned()));
+        }
+        for members in std::iter::once(&group.members).chain(group.named_styles.values()) {
+            seen.clear();
+            for member in members {
+                if !seen.insert(&member.published_layer_id) {
+                    return Err(CatalogError::InvalidData(
+                        "图层组中不能重复添加同一图层".into(),
+                    ));
+                }
+                if self
+                    .get_published_layer(&member.published_layer_id)
+                    .await?
+                    .is_none()
+                {
+                    return Err(CatalogError::NotFound(member.published_layer_id.clone()));
+                }
+                if !member.opacity.is_finite() || !(0.0..=1.0).contains(&member.opacity) {
+                    return Err(CatalogError::InvalidData(
+                        "图层组成员透明度必须位于 0 到 1 之间".into(),
+                    ));
+                }
+                if let Some(style_id) = member.style_id.as_deref() {
+                    if self.get_style(style_id).await?.is_none() {
+                        return Err(CatalogError::NotFound(style_id.to_owned()));
+                    }
                 }
             }
         }
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO layer_groups(id,app_id,name,title,description,enabled) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,enabled=excluded.enabled")
-            .bind(&id).bind(&group.app_id).bind(&group.name).bind(&group.title).bind(&group.description).bind(group.enabled).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO layer_groups(id,app_id,name,title,description,enabled,named_styles) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,enabled=excluded.enabled,named_styles=excluded.named_styles")
+            .bind(&id).bind(&group.app_id).bind(&group.name).bind(&group.title).bind(&group.description).bind(group.enabled).bind(serde_json::to_string(&group.named_styles)?).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM layer_group_members WHERE group_id=?")
             .bind(&id)
             .execute(&mut *tx)
@@ -841,6 +859,17 @@ impl StyleStore for SqliteCatalog {
     }
 
     async fn delete_style(&self, id: &str) -> Result<bool, CatalogError> {
+        if self.list_layer_groups().await?.iter().any(|group| {
+            group
+                .named_styles
+                .values()
+                .flatten()
+                .any(|member| member.style_id.as_deref() == Some(id))
+        }) {
+            return Err(CatalogError::InvalidData(
+                "样式仍被图层组的命名样式引用".into(),
+            ));
+        }
         Ok(sqlx::query("DELETE FROM styles WHERE id=?")
             .bind(id)
             .execute(&self.pool)

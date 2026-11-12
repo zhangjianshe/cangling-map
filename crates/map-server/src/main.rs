@@ -2794,6 +2794,25 @@ async fn clear_layer_cache(
     layer: &PublishedLayer,
 ) -> Result<CacheClearResult, String> {
     let (database, item) = layer_cache_location(state, layer).await?;
+    let styles = state
+        .catalog
+        .list_styles()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut cache_items = vec![item];
+    cache_items.push(styled_layer_cache_item_id(layer, &styles));
+    for style in styles.iter().filter(|style| style.app_id == layer.app_id) {
+        let mut selected = layer.clone();
+        selected.default_style_id = Some(style.id.clone());
+        cache_items.push(styled_layer_cache_item_id(&selected, &styles));
+    }
+    let high_resolution = cache_items
+        .iter()
+        .map(|item| pixel_ratio_cache_item(item, 2))
+        .collect::<Vec<_>>();
+    cache_items.extend(high_resolution);
+    cache_items.sort();
+    cache_items.dedup();
     let cache = active_wmts_cache(state);
     match &cache {
         WmtsCache::None => Ok(CacheClearResult {
@@ -2802,10 +2821,10 @@ async fn clear_layer_cache(
             message: "当前未启用瓦片缓存".into(),
         }),
         WmtsCache::Filesystem { root } => {
-            let targets = [
-                root.join(&database).join(&item),
-                root.join(&database).join(pixel_ratio_cache_item(&item, 2)),
-            ];
+            let targets = cache_items
+                .iter()
+                .map(|item| root.join(&database).join(item))
+                .collect::<Vec<_>>();
             tokio::task::spawn_blocking(move || {
                 let mut cleared = 0;
                 for target in targets {
@@ -2826,7 +2845,6 @@ async fn clear_layer_cache(
             client,
             ..
         } => {
-            let cache_items = [item.clone(), pixel_ratio_cache_item(&item, 2)];
             let mut cleared = 0;
             for cache_item in cache_items {
                 let url = format!(
@@ -3204,6 +3222,16 @@ async fn wms(
                     )
                 }
             };
+            let styles = match state.catalog.list_styles().await {
+                Ok(styles) => styles,
+                Err(error) => {
+                    return xml_exception(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "NoApplicableCode",
+                        &error.to_string(),
+                    )
+                }
+            };
             let mut layers_by_id = HashMap::new();
             for layer in published.into_iter().filter(|layer| layer.enabled) {
                 let catalog = match state.catalog.get_item(layer.catalog_item_id).await {
@@ -3220,6 +3248,7 @@ async fn wms(
                 layers_by_id.insert(
                     layer.id.clone(),
                     CapabilitiesLayer {
+                        styles: layer_style_names(&layer.app_id, &styles),
                         id: layer.id,
                         name: layer.name,
                         title: layer.title,
@@ -3258,6 +3287,9 @@ async fn wms(
                         })
                         .collect::<Vec<_>>();
                     (!layers.is_empty()).then_some(CapabilitiesGroup {
+                        styles: std::iter::once("default".to_owned())
+                            .chain(group.named_styles.keys().cloned())
+                            .collect(),
                         name: group.name,
                         title: group.title,
                         abstract_text: group.description,
@@ -3316,6 +3348,63 @@ async fn geoserver_workspace_wms(
     wms(State(state), headers, Query(parameters)).await
 }
 
+fn layer_style_names(app_id: &str, styles: &[StyleRecord]) -> Vec<String> {
+    std::iter::once("default".to_owned())
+        .chain(
+            styles
+                .iter()
+                .filter(|style| style.app_id == app_id && style.name != "default")
+                .map(|style| style.name.clone()),
+        )
+        .collect()
+}
+
+fn requested_style_name<'a>(requested: &'a str, app_id: &str) -> Option<&'a str> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("default") {
+        return None;
+    }
+    match requested.split_once(':') {
+        Some((workspace, name)) if workspace == app_id => Some(name),
+        Some(_) => None,
+        None => Some(requested),
+    }
+}
+
+fn select_group_style(group: &mut LayerGroup, requested: &str) {
+    if let Some(members) =
+        requested_style_name(requested, &group.app_id).and_then(|name| group.named_styles.get(name))
+    {
+        group.members = members.clone();
+        group.members.sort_by_key(|member| member.position);
+    }
+}
+
+fn select_layer_style(layer: &mut PublishedLayer, requested: &str, styles: &[StyleRecord]) {
+    if let Some(style) = requested_style_name(requested, &layer.app_id).and_then(|name| {
+        styles
+            .iter()
+            .find(|style| style.app_id == layer.app_id && style.name == name)
+    }) {
+        layer.default_style_id = Some(style.id.clone());
+    }
+}
+
+fn styled_layer_cache_item_id(layer: &PublishedLayer, styles: &[StyleRecord]) -> String {
+    let mut identity = serde_json::to_string(layer).expect("published layer is serializable");
+    if let Some(style) = layer
+        .default_style_id
+        .as_deref()
+        .and_then(|id| styles.iter().find(|style| style.id == id))
+    {
+        identity.push_str(&format!(
+            "|{}:{}:{}",
+            style.id, style.revision, style.content_hash
+        ));
+    }
+    sha256_hex(identity.as_bytes())
+}
+
 async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>) -> Response {
     // GeoServer accepts both a workspace-local layer name (`china`) and a
     // qualified name (`ai:china`). Nginx deployments may strip the workspace
@@ -3351,16 +3440,6 @@ async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>)
             return xml_exception(StatusCode::BAD_REQUEST, "MissingParameterValue", &error)
         }
     };
-    if parameters
-        .get("STYLES")
-        .is_some_and(|styles| !styles.is_empty() && !styles.eq_ignore_ascii_case("default"))
-    {
-        return xml_exception(
-            StatusCode::BAD_REQUEST,
-            "StyleNotDefined",
-            "only the published default style is supported",
-        );
-    }
     let parse_u32 = |name: &'static str| -> Result<u32, String> {
         required(name)?
             .parse::<u32>()
@@ -3478,10 +3557,14 @@ async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>)
             )
         }
     };
-    if let Some(group) = groups
+    if let Some(mut group) = groups
         .into_iter()
         .find(|group| group.enabled && group.name == layer_name)
     {
+        select_group_style(
+            &mut group,
+            parameters.get("STYLES").map(String::as_str).unwrap_or(""),
+        );
         let request_scale = scale_denominator(&crs, &bbox, logical_width, logical_height);
         let rendered = match render_group_members(
             &state,
@@ -3525,7 +3608,7 @@ async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>)
             ),
         };
     }
-    let Some(layer) = layers
+    let Some(mut layer) = layers
         .into_iter()
         .find(|layer| layer.enabled && layer.name == layer_name)
     else {
@@ -3592,6 +3675,21 @@ async fn serve_wms_map(state: AppState, mut parameters: HashMap<String, String>)
     let simplify_tolerance = configured_simplify_tolerance(
         layer.simplify_factor,
         vector_resolution(&bbox, logical_width, logical_height),
+    );
+    let available_styles = match state.catalog.list_styles().await {
+        Ok(styles) => styles,
+        Err(error) => {
+            return xml_exception(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                &error.to_string(),
+            )
+        }
+    };
+    select_layer_style(
+        &mut layer,
+        parameters.get("STYLES").map(String::as_str).unwrap_or(""),
+        &available_styles,
     );
     let item = match state.catalog.get_item(layer.catalog_item_id).await {
         Ok(Some(item)) => item,
@@ -4044,10 +4142,21 @@ async fn wmts(
                     )
                 }
             };
+            let styles = match state.catalog.list_styles().await {
+                Ok(styles) => styles,
+                Err(error) => {
+                    return xml_exception(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "NoApplicableCode",
+                        &error.to_string(),
+                    )
+                }
+            };
             let mut layers = published
                 .into_iter()
                 .filter(|layer| layer.enabled)
                 .map(|layer| WmtsCapabilitiesLayer {
+                    styles: layer_style_names(&layer.app_id, &styles),
                     identifier: layer.name,
                     title: layer.title,
                 })
@@ -4055,6 +4164,7 @@ async fn wmts(
             match state.catalog.list_layer_groups().await {
                 Ok(groups) => layers.extend(groups.into_iter().filter(|group| group.enabled).map(
                     |group| WmtsCapabilitiesLayer {
+                        styles: group.named_styles.keys().cloned().collect(),
                         identifier: group.name,
                         title: group.title,
                     },
@@ -4104,14 +4214,6 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
     let request_started = Instant::now();
     let output_size = 256 * u32::from(tile.pixel_ratio);
     state.metrics.wmts_requests.fetch_add(1, Ordering::Relaxed);
-    if tile.style != "default" {
-        return wmts_error(
-            StatusCode::BAD_REQUEST,
-            "StyleNotDefined",
-            "STYLE",
-            "only the default style is currently supported",
-        );
-    }
     let layers = match state.catalog.list_published_layers().await {
         Ok(layers) => layers,
         Err(error) => {
@@ -4134,13 +4236,14 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
             )
         }
     };
-    if let Some(group) = groups
+    if let Some(mut group) = groups
         .into_iter()
         .find(|group| group.enabled && group.name == tile.layer)
     {
+        select_group_style(&mut group, &tile.style);
         return serve_wmts_group_tile(state, tile, group, layers).await;
     }
-    let Some(layer) = layers
+    let Some(mut layer) = layers
         .into_iter()
         .find(|layer| layer.enabled && layer.name == tile.layer)
     else {
@@ -4151,6 +4254,17 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
             "published layer was not found",
         );
     };
+    let available_styles = match state.catalog.list_styles().await {
+        Ok(styles) => styles,
+        Err(error) => {
+            return xml_exception(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "NoApplicableCode",
+                &error.to_string(),
+            )
+        }
+    };
+    select_layer_style(&mut layer, &tile.style, &available_styles);
     let item = match state.catalog.get_item(layer.catalog_item_id).await {
         Ok(Some(item)) => item,
         Ok(None) => {
@@ -4253,7 +4367,10 @@ async fn serve_wmts_tile(state: AppState, tile: TileRequest) -> Response {
             } => id.clone(),
             _ => sha256_hex(layer.app_id.as_bytes()),
         },
-        item: pixel_ratio_cache_item(&layer_cache_item_id(&layer), tile.pixel_ratio),
+        item: pixel_ratio_cache_item(
+            &styled_layer_cache_item_id(&layer, &available_styles),
+            tile.pixel_ratio,
+        ),
         zoom: tile.zoom,
         col: tile.col,
         row: tile.row,

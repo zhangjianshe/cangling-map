@@ -73,6 +73,7 @@ pub fn service_exception(code: &str, message: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct CapabilitiesLayer {
+    pub styles: Vec<String>,
     pub id: String,
     pub name: String,
     pub title: String,
@@ -87,6 +88,7 @@ pub struct CapabilitiesLayer {
 
 #[derive(Debug, Clone)]
 pub struct CapabilitiesGroup {
+    pub styles: Vec<String>,
     pub name: String,
     pub title: String,
     pub abstract_text: Option<String>,
@@ -112,6 +114,7 @@ pub fn capabilities_xml(
         if let Some(text) = &group.abstract_text {
             layer_xml.push_str(&format!("<Abstract>{}</Abstract>", xml_escape(text)));
         }
+        write_styles(&mut layer_xml, &group.styles);
         for layer in &group.layers {
             write_layer(&mut layer_xml, layer);
         }
@@ -125,6 +128,16 @@ pub fn capabilities_xml(
     )
 }
 
+fn write_styles(xml: &mut String, styles: &[String]) {
+    for name in styles {
+        xml.push_str(&format!(
+            "<Style><Name>{}</Name><Title>{}</Title></Style>",
+            xml_escape(name),
+            xml_escape(name)
+        ));
+    }
+}
+
 fn write_layer(xml: &mut String, layer: &CapabilitiesLayer) {
     let queryable = if layer.queryable { "1" } else { "0" };
     xml.push_str(&format!(
@@ -135,6 +148,7 @@ fn write_layer(xml: &mut String, layer: &CapabilitiesLayer) {
     if let Some(text) = &layer.abstract_text {
         xml.push_str(&format!("<Abstract>{}</Abstract>", xml_escape(text)));
     }
+    write_styles(xml, &layer.styles);
     if let Some(scale) = layer.min_scale_denominator {
         xml.push_str(&format!(
             "<MinScaleDenominator>{scale}</MinScaleDenominator>"
@@ -207,6 +221,7 @@ mod tests {
         let xml = capabilities_xml(
             "http://localhost/wms",
             &[CapabilitiesLayer {
+                styles: vec![],
                 id: "layer-1".into(),
                 name: "terrain".into(),
                 title: "Terrain".into(),
@@ -234,6 +249,7 @@ mod tests {
     #[test]
     fn capabilities_nests_layers_in_directory_groups() {
         let layer = CapabilitiesLayer {
+            styles: vec![],
             id: "terrain-id".into(),
             name: "terrain".into(),
             title: "区域地形".into(),
@@ -254,6 +270,7 @@ mod tests {
             "http://localhost/wms",
             &[],
             &[CapabilitiesGroup {
+                styles: vec![],
                 name: "base".into(),
                 title: "基础数据".into(),
                 abstract_text: Some("底图目录".into()),

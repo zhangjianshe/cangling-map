@@ -160,6 +160,7 @@ pub fn tile_bounds(zoom: u8, row: u32, col: u32) -> Result<TileBounds, WmtsError
 
 #[derive(Debug, Clone)]
 pub struct CapabilitiesLayer {
+    pub styles: Vec<String>,
     pub identifier: String,
     pub title: String,
 }
@@ -168,7 +169,18 @@ pub fn capabilities_xml(service_url: &str, layers: &[CapabilitiesLayer]) -> Stri
     let url = xml_escape(service_url);
     let mut layer_xml = String::new();
     for layer in layers {
-        layer_xml.push_str(&format!("<Layer><ows:Title>{}</ows:Title><ows:Identifier>{}</ows:Identifier><Style isDefault=\"true\"><ows:Identifier>default</ows:Identifier></Style><Format>image/png</Format><TileMatrixSetLink><TileMatrixSet>{MATRIX_SET}</TileMatrixSet></TileMatrixSetLink></Layer>", xml_escape(&layer.title), xml_escape(&layer.identifier)));
+        let named_styles = layer
+            .styles
+            .iter()
+            .filter(|name| name.as_str() != "default")
+            .map(|name| {
+                format!(
+                    "<Style isDefault=\"false\"><ows:Identifier>{}</ows:Identifier></Style>",
+                    xml_escape(name)
+                )
+            })
+            .collect::<String>();
+        layer_xml.push_str(&format!("<Layer><ows:Title>{}</ows:Title><ows:Identifier>{}</ows:Identifier><Style isDefault=\"true\"><ows:Identifier>default</ows:Identifier></Style>{named_styles}<Format>image/png</Format><TileMatrixSetLink><TileMatrixSet>{MATRIX_SET}</TileMatrixSet></TileMatrixSetLink></Layer>", xml_escape(&layer.title), xml_escape(&layer.identifier)));
     }
     let mut matrices = String::new();
     for zoom in 0..=MAX_ZOOM {

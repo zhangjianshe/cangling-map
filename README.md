@@ -12,6 +12,28 @@ WMTS 1.0.0、矢量/栅格渲染、GeoCSS 样式、图层组、瓦片缓存和�
 - 数据目录 `/data` 与可随时清理的缓存目录 `/cache` 相互独立；
 - Docker 镜像支持 `linux/amd64` 和 `linux/arm64`。
 
+## 客户端选择样式
+
+WMS 使用 `STYLES`，WMTS 使用 `STYLE`。单图层可按样式名称（如 `blue` 或
+`ai:blue`）选择同一应用中的样式。留空、`default` 或未配置的名称都回退到图层默认样式。
+
+图层组编辑页的“成员图层”中可选择“请求样式”，将默认成员配置复制为
+`china_light`、`china_dark` 等命名方案，再分别调整各成员的样式、顺序、透明度与比例尺。
+原有成员配置仍是默认方案；缺失的命名方案回退到默认方案。保存后客户端例如：
+
+```text
+/ai/wms?SERVICE=WMS&REQUEST=GetMap&LAYERS=china&STYLES=china_dark&...
+/wmts?SERVICE=WMTS&REQUEST=GetTile&LAYER=china&STYLE=china_dark&...
+```
+
+管理 API 的图层组对象新增 `named_styles`：名称映射到一组成员配置，成员结构与
+`members` 相同；省略时为空，原有数据库会自动迁移。WMS/WMTS 能力文档会列出可用名称。
+命名样式不需要绑定为图层默认样式。未知名称回退是本服务的兼容策略。
+瓦片缓存按实际样式与样式版本区分；修改样式后不会复用旧版本瓦片。
+
+验证：`cargo build -p map-server && python3 scripts/test-named-styles.py`，脚本使用临时目录和
+本地独立服务验证图片差异、回退、缓存、能力文档及重启后的配置持久化。
+
 ## 架构
 
 ```text
