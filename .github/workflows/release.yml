@@ -154,7 +154,7 @@ jobs:
               -H "API-TOKEN: ${CANGLING_TOKEN}" \
               -F "token=${DATASET_TOKEN}" \
               -F "version=latest" \
-              -F "name=cangling-map" \
+              -F "name=${filename}" \
               -F "summary=cangling-map v${RELEASE_VERSION}" \
               -F "os=linux" \
               -F "arch=${arch}" \
@@ -178,5 +178,5 @@ jobs:
           done
 
           # Update the advertised version only after both archives and checksums upload.
-          printf 'v%s\n' "$RELEASE_VERSION" > dist/version.txt
-          upload_file version.txt amd64
+          printf 'v%s\n' "$RELEASE_VERSION" > dist/cangling-map-version.txt
+          upload_file cangling-map-version.txt all
