@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise named styles against an isolated local server (cargo build -p map-server first)."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -18,8 +19,15 @@ WORLD = '-20037508.342789244,-20037508.342789244,20037508.342789244,20037508.342
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--image', help='Test a Docker image instead of the local binary')
+    parser.add_argument('--platform', choices=['linux/amd64', 'linux/arm64'])
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='map-named-styles-') as temp:
         root = Path(temp)
+        if args.image:
+            # The image runs as UID 10001. Keep this disposable fixture writable.
+            root.chmod(0o777)
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
@@ -43,8 +51,20 @@ def main():
                 return json.loads(body) if 'json' in response.headers.get('Content-Type', '') else body
 
         def start(log):
-            process = subprocess.Popen([str(BINARY)], cwd=root, env=env, stdout=log, stderr=log)
-            for _ in range(100):
+            command = [str(BINARY)]
+            if args.image:
+                command = ['docker', 'run', '--rm', '--pull=never',
+                           '--name', root.name, '-p', f'127.0.0.1:{port}:3000',
+                           '-v', f'{root}:{root}', '--workdir', str(root)]
+                if args.platform:
+                    command += ['--platform', args.platform]
+                for key in ('CATALOG_DATABASE_URL', 'IMAGERY_DATABASE_URL',
+                            'IMAGERY_INDEX_DATABASE_URL', 'PLACENAMES_DATABASE_URL',
+                            'WMTS_CACHE_BACKEND', 'WMTS_CACHE_PATH'):
+                    command += ['-e', key + '=' + env[key]]
+                command += ['-e', 'MAP_SERVER_ADDRESS=0.0.0.0:3000', args.image]
+            process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=log)
+            for _ in range(600):
                 try:
                     request('/api/styles')
                     return process
@@ -55,6 +75,14 @@ def main():
             process.terminate()
             process.wait()
             raise RuntimeError('server did not start')
+
+        def stop(process):
+            if args.image:
+                subprocess.run(['docker', 'rm', '-f', root.name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                process.terminate()
+            process.wait(timeout=30)
 
         with (root / 'server.log').open('w+') as log:
             process = start(log)
@@ -128,16 +156,21 @@ def main():
                     raise AssertionError('missing member style was accepted')
                 except HTTPError as error:
                     assert error.code == 422
-                process.terminate()
-                process.wait(timeout=10)
+                stop(process)
                 process = start(log)
                 saved = request('/api/layer-groups')
                 assert next(g for g in saved if g['id'] == group['id'])['named_styles'] == group['named_styles']
                 assert wms('china', '', True) != wms('china', 'china_dark', True)
                 print('PASS: named WMS/tiled WMS/WMTS, fallback, workspace isolation, capabilities, style cache revisions, persistence')
             finally:
-                process.terminate()
-                process.wait(timeout=10)
+                stop(process)
+                if args.image:
+                    cleanup = ['docker', 'run', '--rm', '--pull=never', '--user', '0',
+                               '--entrypoint', '/bin/sh', '-v', f'{root}:/test-fixture']
+                    if args.platform:
+                        cleanup += ['--platform', args.platform]
+                    subprocess.run(cleanup + [args.image, '-c', 'chmod -R a+rwX /test-fixture'],
+                                   check=True, stdout=subprocess.DEVNULL)
 
 
 if __name__ == '__main__':
