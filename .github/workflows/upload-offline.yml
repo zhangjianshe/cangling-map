@@ -1,0 +1,75 @@
+name: Restore offline image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing released image version, without the v prefix
+        required: true
+        default: '0.1.25'
+      arch:
+        description: CPU architecture to restore
+        type: choice
+        required: true
+        default: amd64
+        options: [amd64, arm64]
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    name: Restore ${{ inputs.arch }} offline image
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
+    steps:
+      - name: Login to Cangling registry
+        uses: docker/login-action@v4
+        with:
+          registry: harbor.cangling.cn:22002
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Export and upload the existing released image
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          ARCH: ${{ inputs.arch }}
+          CANGLING_TOKEN: ${{ secrets.CANGLING_TOKEN }}
+          DATASET_TOKEN: e2a964ab97c0422d9a2000bffff4fb1b
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$ARCH" == amd64 || "$ARCH" == arm64 ]]
+          : "${CANGLING_TOKEN:?Configure CANGLING_TOKEN before uploading}"
+          source="harbor.cangling.cn:22002/cangling/cangling-map:${RELEASE_VERSION}-${ARCH}"
+          offline="hub.cangling.cn/cangling/cangling-map:${RELEASE_VERSION}"
+          filename="cangling-map-linux-${ARCH}.tar.gz"
+          mkdir -p dist
+          docker pull --platform "linux/${ARCH}" "$source"
+          test "$(docker image inspect "$source" --format '{{.Architecture}}')" = "$ARCH"
+          test "$(docker image inspect "$source" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$RELEASE_VERSION"
+          docker tag "$source" "$offline"
+          docker save "$offline" | gzip -n > "dist/${filename}"
+          (cd dist && sha256sum "$filename" > "${filename}.sha256")
+          for file in "$filename" "${filename}.sha256"; do
+            curl --fail-with-body --silent --show-error \
+              --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 1800 \
+              "https://soft.cangling.cn:22002/api/v1/software/upload" \
+              -H "API-TOKEN: ${CANGLING_TOKEN}" \
+              -F "token=${DATASET_TOKEN}" \
+              -F "version=latest" \
+              -F "name=${file}" \
+              -F "summary=cangling-map v${RELEASE_VERSION}" \
+              -F "os=linux" \
+              -F "arch=${ARCH}" \
+              -F "file=@dist/${file}" \
+              --output dist/upload-response.json
+            python3 - <<'PY'
+          import json
+          response = json.load(open('dist/upload-response.json'))
+          if response.get('code') != 200 or response.get('success') is not True:
+              raise SystemExit('Software upload rejected: ' + str(response.get('message')))
+          PY
+          done
+          # Restoring one architecture must not advance the advertised release version.
