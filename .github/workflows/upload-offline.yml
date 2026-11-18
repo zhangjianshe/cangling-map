@@ -63,5 +63,5 @@ jobs:
           test "$(docker image inspect "$source" --format '{{.Architecture}}')" = "$ARCH"
           test "$(docker image inspect "$source" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$RELEASE_VERSION"
           docker tag "$source" "$offline"
-          docker save "$offline" | gzip -n > "dist/${filename}"
+          docker save --platform "linux/${ARCH}" "$offline" | gzip -n > "dist/${filename}"
           python scripts/upload-drive-image.py --project cangling-map --arch "$ARCH" --file "dist/${filename}"

@@ -167,6 +167,6 @@ jobs:
             actual_arch="$(docker image inspect "$source_image" --format '{{.Architecture}}')"
             test "$actual_arch" = "$arch"
             docker tag "$source_image" "$offline_image"
-            docker save "$offline_image" | gzip -n > "dist/${filename}"
+            docker save --platform "linux/${arch}" "$offline_image" | gzip -n > "dist/${filename}"
             python scripts/upload-drive-image.py --project cangling-map --arch "$arch" --file "dist/${filename}"
           done
