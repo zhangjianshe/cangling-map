@@ -141,32 +141,21 @@ jobs:
       - name: Checkout upload scripts
         uses: actions/checkout@v5
 
-      - name: Set up Python for drive upload
+      - name: Set up Python for release webhook
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Test drive image uploader
-        run: python scripts/test-upload-drive-image.py
+      - name: Test webhook client
+        run: python scripts/test-release-via-webhook.py
 
-      - name: Export and upload offline images to cangling-repo drive
+      - name: Publish images through the internal webhook
         env:
           RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
-          WRITE_TOKEN: ${{ secrets.WRITE_TOKEN }}
+          RELEASE_WEBHOOK_URL: ${{ vars.RELEASE_WEBHOOK_URL }}
+          RELEASE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
-          : "${WRITE_TOKEN:?Configure WRITE_TOKEN before publishing to the drive}"
-          mkdir -p dist
-          # Export sequentially: both architectures use the same offline image tag.
-          offline_image="hub.cangling.cn/cangling/cangling-map:${RELEASE_VERSION}"
-          for arch in amd64 arm64; do
-            source_image="${IMAGE}:${RELEASE_VERSION}-${arch}"
-            filename="cangling-map-linux-${arch}.tar.gz"
-            docker pull --platform "linux/${arch}" "$source_image"
-            actual_arch="$(docker image inspect "$source_image" --format '{{.Architecture}}')"
-            test "$actual_arch" = "$arch"
-            docker tag "$source_image" "$offline_image"
-            docker save --platform "linux/${arch}" "$offline_image" | gzip -n > "dist/${filename}"
-            python scripts/upload-drive-image.py --project cangling-map --arch "$arch" --file "dist/${filename}"
-          done
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${RELEASE_VERSION}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          python scripts/release-via-webhook.py --project cangling-map --version "$RELEASE_VERSION" --digest "$digest"

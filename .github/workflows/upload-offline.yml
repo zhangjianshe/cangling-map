@@ -34,8 +34,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Test drive image uploader
-        run: python scripts/test-upload-drive-image.py
+      - name: Test webhook client
+        run: python scripts/test-release-via-webhook.py
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Cangling registry
         uses: docker/login-action@v4
@@ -44,24 +47,16 @@ jobs:
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
-      - name: Export and upload the existing released image
+      - name: Publish the existing released image through webhook
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           ARCH: ${{ inputs.arch }}
-          WRITE_TOKEN: ${{ secrets.WRITE_TOKEN }}
+          RELEASE_WEBHOOK_URL: ${{ vars.RELEASE_WEBHOOK_URL }}
+          RELEASE_WEBHOOK_SECRET: ${{ secrets.RELEASE_WEBHOOK_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$ARCH" == amd64 || "$ARCH" == arm64 ]]
-          : "${WRITE_TOKEN:?Configure WRITE_TOKEN before uploading}"
           source="harbor.cangling.cn:22002/cangling/cangling-map:${RELEASE_VERSION}-${ARCH}"
-          offline="hub.cangling.cn/cangling/cangling-map:${RELEASE_VERSION}"
-          filename="cangling-map-linux-${ARCH}.tar.gz"
-          mkdir -p dist
-          docker pull --platform "linux/${ARCH}" "$source"
-          test "$(docker image inspect "$source" --format '{{.Architecture}}')" = "$ARCH"
-          test "$(docker image inspect "$source" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$RELEASE_VERSION"
-          docker tag "$source" "$offline"
-          docker save --platform "linux/${ARCH}" "$offline" | gzip -n > "dist/${filename}"
-          python scripts/upload-drive-image.py --project cangling-map --arch "$ARCH" --file "dist/${filename}"
+          digest="$(docker buildx imagetools inspect "$source" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+          python scripts/release-via-webhook.py --project cangling-map --version "$RELEASE_VERSION" --digest "$digest" --arch "$ARCH" --allow-downgrade
