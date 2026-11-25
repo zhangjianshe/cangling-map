@@ -1,0 +1,233 @@
+{
+  "public": {
+    "stanford-dragon": {
+      "files": 4,
+      "first": {
+        "MISS": 4
+      },
+      "second": {
+        "HIT": 4
+      }
+    },
+    "zhengzhou-cbd-osm": {
+      "files": 31,
+      "first": {
+        "MISS": 31
+      },
+      "second": {
+        "HIT": 31
+      }
+    }
+  },
+  "local": {
+    "verified_files": 35,
+    "miss_hit_sha256": true,
+    "range_head_etag": true,
+    "disabled_dataset": true,
+    "tile_failure_fallback": true,
+    "cache_stats": {
+      "datasets": [
+        {
+          "bytes": 4791036,
+          "dataset": "stanford-dragon",
+          "hits": 5,
+          "objects": 4,
+          "revision": "c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566"
+        },
+        {
+          "bytes": 1864472,
+          "dataset": "zhengzhou-cbd-osm",
+          "hits": 34,
+          "objects": 31,
+          "revision": "e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71"
+        }
+      ]
+    }
+  },
+  "browser": {
+    "dragon-low": {
+      "height": 30000.0,
+      "camera": {
+        "heading": 110.67188143056548,
+        "height": 30000.0,
+        "latitude": 40.04253061142586,
+        "longitude": -75.61209430782448,
+        "tilt": 13.292622923412608
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 1,
+            "errors": [],
+            "id": "8dc16f33-e221-4b5a-8b03-f187b4fbd50d",
+            "loaded": 1,
+            "nodes": 3,
+            "pending": 0,
+            "selectedContents": [
+              "versions/c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566/dragon_low.b3dm"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580957158,
+        "revision": 3
+      }
+    },
+    "dragon-medium": {
+      "height": 6000.0,
+      "camera": {
+        "heading": 110.67188143056548,
+        "height": 6000.0,
+        "latitude": 40.04253061142586,
+        "longitude": -75.61209430782448,
+        "tilt": 13.292622923412608
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 1,
+            "errors": [],
+            "id": "8dc16f33-e221-4b5a-8b03-f187b4fbd50d",
+            "loaded": 2,
+            "nodes": 3,
+            "pending": 0,
+            "selectedContents": [
+              "versions/c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566/dragon_medium.b3dm"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580958296,
+        "revision": 3
+      }
+    },
+    "dragon-high": {
+      "height": 2000.0,
+      "camera": {
+        "heading": 110.67188143056548,
+        "height": 2000.0,
+        "latitude": 40.04253061142586,
+        "longitude": -75.61209430782448,
+        "tilt": 13.292622923412608
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 1,
+            "errors": [],
+            "id": "8dc16f33-e221-4b5a-8b03-f187b4fbd50d",
+            "loaded": 3,
+            "nodes": 3,
+            "pending": 0,
+            "selectedContents": [
+              "versions/c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566/dragon_high.b3dm"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580959422,
+        "revision": 3
+      }
+    },
+    "zz-low": {
+      "height": 12000.0,
+      "level": "low",
+      "camera": {
+        "heading": 0,
+        "height": 12000.0,
+        "latitude": 34.775,
+        "longitude": 113.728,
+        "tilt": 0
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 1,
+            "errors": [],
+            "id": "234fa503-77e4-4f70-b563-f86d26446153",
+            "loaded": 1,
+            "nodes": 30,
+            "pending": 0,
+            "selectedContents": [
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-low.glb"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580943794,
+        "revision": 2
+      }
+    },
+    "zz-medium": {
+      "height": 6500.0,
+      "level": "medium",
+      "camera": {
+        "heading": 0,
+        "height": 6500.0,
+        "latitude": 34.775,
+        "longitude": 113.728,
+        "tilt": 0
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 1,
+            "errors": [],
+            "id": "234fa503-77e4-4f70-b563-f86d26446153",
+            "loaded": 2,
+            "nodes": 30,
+            "pending": 0,
+            "selectedContents": [
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-medium.glb"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580945138,
+        "revision": 2
+      }
+    },
+    "zz-high": {
+      "height": 3500.0,
+      "level": "high",
+      "camera": {
+        "heading": 0,
+        "height": 3500.0,
+        "latitude": 34.775,
+        "longitude": 113.728,
+        "tilt": 0
+      },
+      "status": {
+        "layers": [
+          {
+            "budgetLimited": false,
+            "drawing": 28,
+            "errors": [],
+            "id": "234fa503-77e4-4f70-b563-f86d26446153",
+            "loaded": 30,
+            "nodes": 30,
+            "pending": 0,
+            "selectedContents": [
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-1-2.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-3-3.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-2-3.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-3-2.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-2-2.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-2-1.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-4-2.glb",
+              "versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/buildings-2-4.glb"
+            ],
+            "visible": true
+          }
+        ],
+        "reportedAt": 1795580947505,
+        "revision": 2
+      }
+    }
+  }
+}

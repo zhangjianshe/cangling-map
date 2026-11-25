@@ -67,6 +67,7 @@ mod leadership;
 mod placenames;
 mod terrain;
 mod tiles3d;
+mod tiles3d_cache;
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
 

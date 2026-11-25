@@ -159,7 +159,30 @@ pub(crate) async fn entry(
     // URL rather than a redirect's final URL (including Cesium Resource).
     let full = map_3dtiles::safe_path(&root(), &format!("{id}/versions/{rev}/tileset.json"))
         .map_err(bad)?;
-    let data = tokio::fs::read(full).await.map_err(internal)?;
+    let manifest = s
+        .catalog
+        .tiles3d_manifest(&id, &rev)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| internal("版本清单不存在"))?;
+    let info = &manifest["files"]["tileset.json"];
+    let cached = crate::tiles3d_cache::load(
+        &s,
+        &id,
+        &rev,
+        "tileset.json",
+        info["sha256"].as_str().unwrap_or(""),
+        info["bytes"].as_u64().unwrap_or(u64::MAX),
+        &full,
+    )
+    .await;
+    let (data, cache_status) = match cached.map_err(internal)? {
+        Some(v) => v,
+        None => (
+            bytes::Bytes::from(tokio::fs::read(full).await.map_err(internal)?),
+            "BYPASS",
+        ),
+    };
     let mut document: Value = serde_json::from_slice(&data).map_err(internal)?;
     fn qualify(tile: &mut Value, prefix: &str) {
         if let Some(content) = tile.get_mut("content") {
@@ -185,6 +208,9 @@ pub(crate) async fn entry(
     }
     qualify(&mut document["root"], &format!("versions/{rev}/"));
     let mut response = Json(document).into_response();
+    response
+        .headers_mut()
+        .insert("x-tiles3d-cache", cache_status.parse().unwrap());
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -235,12 +261,33 @@ pub(crate) async fn asset(
         )
             .into_response());
     }
-    let mut service = tower_http::services::ServeFile::new(full);
-    let mut response = service
-        .try_call(request)
-        .await
-        .map_err(internal)?
-        .map(Body::new);
+    let cached = crate::tiles3d_cache::load(
+        &s,
+        &id,
+        &revision,
+        &path,
+        info["sha256"].as_str().unwrap_or(""),
+        info["bytes"].as_u64().unwrap_or(u64::MAX),
+        &full,
+    )
+    .await;
+    let (mut response, cache_status) = match cached.map_err(internal)? {
+        Some((data, status)) => (cached_response(data, &request, &etag), status),
+        None => {
+            let mut service = tower_http::services::ServeFile::new(full);
+            (
+                service
+                    .try_call(request)
+                    .await
+                    .map_err(internal)?
+                    .map(Body::new),
+                "BYPASS",
+            )
+        }
+    };
+    response
+        .headers_mut()
+        .insert("x-tiles3d-cache", cache_status.parse().unwrap());
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         info["mime"]
@@ -260,4 +307,108 @@ pub(crate) async fn asset(
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
     Ok(response)
+}
+
+// Single byte ranges cover GLB/B3DM readers. Multiple ranges are legally ignored
+// with a full 200 response, rather than returning an invalid multipart body.
+fn cached_response(data: bytes::Bytes, request: &Request, etag: &str) -> Response {
+    let len = data.len();
+    let range = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok());
+    let if_range = request
+        .headers()
+        .get(header::IF_RANGE)
+        .and_then(|v| v.to_str().ok());
+    let mut start = 0;
+    let mut end = len;
+    let mut status = StatusCode::OK;
+    if if_range.is_none() || if_range == Some(etag) {
+        if let Some(range) = range.filter(|r| r.starts_with("bytes=") && !r.contains(',')) {
+            let parsed = range[6..].split_once('-').and_then(|(a, b)| {
+                if a.is_empty() {
+                    b.parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .map(|n| (len.saturating_sub(n), len))
+                } else {
+                    let first = a.parse::<usize>().ok()?;
+                    let last = if b.is_empty() {
+                        len
+                    } else {
+                        b.parse::<usize>().ok()?.saturating_add(1).min(len)
+                    };
+                    Some((first, last))
+                }
+            });
+            match parsed {
+                Some((a, b)) if a < b && a < len => {
+                    start = a;
+                    end = b;
+                    status = StatusCode::PARTIAL_CONTENT;
+                }
+                _ => {
+                    return (
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+    let mut response = Response::new(if request.method() == axum::http::Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(data.slice(start..end))
+    });
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        (end - start).to_string().parse().unwrap(),
+    );
+    if status == StatusCode::PARTIAL_CONTENT {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{}/{len}", end - 1).parse().unwrap(),
+        );
+    }
+    response
+}
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cached_ranges_and_head() {
+        for (range, code, length) in [
+            ("bytes=2-4", 206, "3"),
+            ("bytes=-2", 206, "2"),
+            ("bytes=9-", 416, ""),
+            ("bytes=0-0,2-2", 200, "6"),
+        ] {
+            let req = Request::builder()
+                .header(header::RANGE, range)
+                .body(Body::empty())
+                .unwrap();
+            let res = cached_response(bytes::Bytes::from_static(b"abcdef"), &req, "etag");
+            assert_eq!(res.status().as_u16(), code);
+            if code != 416 {
+                assert_eq!(res.headers()[header::CONTENT_LENGTH], length);
+            }
+        }
+        let req = Request::builder()
+            .method("HEAD")
+            .body(Body::empty())
+            .unwrap();
+        let res = cached_response(bytes::Bytes::from_static(b"abcdef"), &req, "etag");
+        assert_eq!(res.headers()[header::CONTENT_LENGTH], "6");
+        assert!(axum::body::to_bytes(res.into_body(), 100)
+            .await
+            .unwrap()
+            .is_empty());
+    }
 }
