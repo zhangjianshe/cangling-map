@@ -26,6 +26,9 @@ def walk(node,parent=None):
     enu=[v[0],-v[2],v[1]];assert all(lo[j]-1e-3<=enu[j]<=hi[j]+1e-3 for j in range(3))
  if level in ('low','medium','high'):
   assert len(g['meshes'][0]['primitives'])==2
+  assert len(g['images'])==3
+  assert g['materials'][1]['normalTexture']['index']==1
+  assert g['materials'][1]['pbrMetallicRoughness']['metallicRoughnessTexture']['index']==2
   assert g['samplers'][0]['wrapS']==10497 and g['samplers'][0]['wrapT']==10497
   image=g['bufferViews'][g['images'][0]['bufferView']];assert binary[image['byteOffset']:image['byteOffset']+8]==b'\x89PNG\r\n\x1a\n'
   referenced=[]

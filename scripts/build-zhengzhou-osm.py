@@ -131,6 +131,15 @@ from PIL import ImageDraw
 pen=ImageDraw.Draw(facade);pen.rectangle((13,11,51,50),fill=(55,120,170,255))
 pen.rectangle((30,11,33,50),fill=(235,240,245,255));pen.rectangle((13,29,51,32),fill=(235,240,245,255))
 facade_bytes=io.BytesIO();facade.save(facade_bytes,format='PNG');facade_png=facade_bytes.getvalue()
+# Shallow procedural window-frame relief; no geometry or building height changes.
+relief=np.zeros((64,64),dtype=float);relief[10:52,12:53]=.25;relief[13:49,15:50]=-.1
+nx=-(np.roll(relief,-1,axis=1)-np.roll(relief,1,axis=1));ny=-(np.roll(relief,-1,axis=0)-np.roll(relief,1,axis=0));nz=np.ones_like(nx)
+normal=np.stack([nx,ny,nz],axis=2);normal/=np.linalg.norm(normal,axis=2,keepdims=True)
+normal_image=Image.fromarray(np.round((normal*.5+.5)*255).astype('uint8'),'RGB')
+normal_bytes=io.BytesIO();normal_image.save(normal_bytes,format='PNG');normal_png=normal_bytes.getvalue()
+material_image=Image.new('RGB',(64,64),(255,225,255));ImageDraw.Draw(material_image).rectangle((13,11,51,50),fill=(255,55,255))
+material_bytes=io.BytesIO();material_image.save(material_bytes,format='PNG');material_png=material_bytes.getvalue()
+
 def glb(fs,textured=True):
  positions=[];normals=[];uvs=[];wall_indices=[];roof_indices=[]
  def xyz(x,y,z):
@@ -174,10 +183,12 @@ def glb(fs,textured=True):
    return len(doc['bufferViews'])-1
   uv=np.asarray(uvs,dtype='<f4');assert np.isfinite(uv).all()
   doc['accessors'].append({'bufferView':append(uv.tobytes()),'componentType':5126,'count':len(uv),'type':'VEC2'})
-  doc['images']=[{'bufferView':append(facade_png),'mimeType':'image/png'}]
+  doc['images']=[{'bufferView':append(raw),'mimeType':'image/png'} for raw in (facade_png,normal_png,material_png)]
   doc['samplers']=[{'wrapS':10497,'wrapT':10497,'magFilter':9729,'minFilter':9987}]
-  doc['textures']=[{'source':0,'sampler':0}]
+  doc['textures']=[{'source':i,'sampler':0} for i in range(3)]
   doc['materials']=[{'doubleSided':True,'pbrMetallicRoughness':{'baseColorFactor':[.4,.43,.46,1],'metallicFactor':0,'roughnessFactor':1}}, {'doubleSided':True,'pbrMetallicRoughness':{'baseColorTexture':{'index':0},'metallicFactor':0,'roughnessFactor':.9}}]
+  doc['materials'][1]['normalTexture']={'index':1,'scale':.5}
+  doc['materials'][1]['pbrMetallicRoughness']['metallicRoughnessTexture']={'index':2}
   primitives=[]
   for material,indices in [(0,roof_indices),(1,wall_indices)]:
    view=append(np.asarray(indices,dtype='<u4').tobytes());accessor=len(doc['accessors'])
