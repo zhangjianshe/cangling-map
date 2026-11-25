@@ -813,3 +813,10 @@ GitHub 仓库配置 Actions Secret `RELEASE_WEBHOOK_SECRET` 和变量
 可手动执行 `Publish existing Harbor images` 工作流，输入已编译的版本及目标架构，
 无需重新编译即可通过同一 webhook 发布。恢复旧版本需明确选择 `allow_downgrade`。
 服务端任务使用 SQLite 保存，失败可重试，worker 重启后恢复未完成任务。
+
+### 3D Tiles 发布服务
+
+管理页 `/3dtiles` 支持登记、校验、发布与停用已有显式瓦片集。通过
+`TILES3D_DATA_ROOT/<id>/source/tileset.json` 导入；稳定访问入口为
+`/3dtiles/<id>/tileset.json`。版本内容快照独立保存，支持 GLB、b3dm、pnts 和嵌套 tileset。
+详细接口、支持范围、部署要求与验收命令见 [3D Tiles 发布说明](docs/3dtiles.md)。

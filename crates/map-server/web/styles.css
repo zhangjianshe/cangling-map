@@ -104,3 +104,8 @@ body:has(.metrics-grid)>main{padding-bottom:56px}
 
 body>aside nav a[href$="/terrain"]::after{content:"DEM 服务"}
 body>aside nav a[href$="/terrain"]{--nav-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m2 19 6-12 4 7 3-5 7 10H2Z'/%3E%3Cpath d='M2 22h20'/%3E%3C/g%3E%3C/svg%3E")}
+
+/* 3D Tiles publishing uses compact panels rather than the catalog's empty-state height. */
+.tiles3d-page .panel{min-height:0}.tiles3d-page #register label{display:flex;flex-direction:column;gap:6px;min-width:220px}.tiles3d-page #register input{height:40px}.tiles3d-page .panel>p{color:var(--muted);line-height:1.6}.tiles3d-page #feedback{color:var(--ink);margin-bottom:0}.tiles3d-page #feedback:empty{display:none}.tiles3d-page #bounds{font-size:12px;max-height:160px;overflow:auto;background:#f7f8fa;padding:12px}.tiles3d-page #details h2{font-size:18px;margin:0 0 12px}.tiles3d-page .panel:has(table){overflow:auto}.tiles3d-page table{display:table;min-width:800px}
+body>aside nav a[href$="/3dtiles"]::after{content:"3D Tiles"}
+body>aside nav a[href$="/3dtiles"]{--nav-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'%3E%3Cpath d='m12 3 9 5v9l-9 5-9-5V8l9-5Zm0 10 9-5M12 13 3 8m9 5v9'/%3E%3C/g%3E%3C/svg%3E")}

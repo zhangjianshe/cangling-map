@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>3D Tiles 服务 · Cangling Map</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/terrain.css">
+</head>
+<body class="tiles3d-page">
+<aside>
+  <a class="brand" href="/"><i>◇</i><span><b>Cangling</b><small>地图服务</small><small class="build-summary">v{{MAP_VERSION}} · {{MAP_BUILD_DATE}}</small></span></a>
+  <nav><label>数据</label><a href="/catalog">▦ 数据目录</a><a href="/styles">◒ 样式管理</a><a href="/style-assets">▧ 图片资源</a><label>发布配置</label><a href="/published-layers">◫ 发布图层</a><a href="/layer-groups">⊞ 图层组</a><label>设置</label><a href="/settings/cache">⚙ 缓存服务</a><label>服务</label><a href="/terrain">▤ DEM 服务</a><a class="active" href="/3dtiles">◇ 3D Tiles</a><a href="/metrics">⌁ 指标</a><a href="/wms?SERVICE=WMS&amp;REQUEST=GetCapabilities&amp;VERSION=1.3.0">◎ WMS 服务</a><a href="/wmts?SERVICE=WMTS&amp;REQUEST=GetCapabilities&amp;VERSION=1.0.0">▦ WMTS 服务</a></nav>
+  <footer><em></em><span><b>服务运行中</b><small>SQLite 目录库</small></span></footer>
+</aside>
+<main>
+<header><div><label>三维数据</label><h1>3D Tiles 服务</h1><p>登记本机已有瓦片集，校验后发布独立版本。</p></div><button id="refresh" type="button">刷新列表</button></header>
+<section class="panel" style="padding:24px"><form id="register" style="display:flex;gap:12px;align-items:end;flex-wrap:wrap"><label>数据集 ID<input id="dataset-id" required pattern="[A-Za-z0-9_-]{1,64}" maxlength="64" placeholder="例如 buildings"></label><label>名称<input id="title" required maxlength="128" placeholder="数据集名称"></label><button class="primary" type="submit">登记 / 更新名称</button></form><p>将已有数据放到 <code>TILES3D_DATA_ROOT/&lt;ID&gt;/source/tileset.json</code>，所有内容文件保持相对目录结构。支持显式 GLB、b3dm、pnts 和嵌套 tileset；暂不支持隐式瓦片、外部 URL、转换与 LOD 生成。</p><p id="feedback" role="status"></p></section>
+<section class="panel" style="margin-top:20px"><table><thead><tr><th>名称 / ID</th><th>状态</th><th>版本</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></section>
+<section id="details" class="panel hidden" style="margin-top:20px;padding:24px"><h2 id="detail-title"></h2><p id="source"></p><p id="summary"></p><pre id="bounds" style="white-space:pre-wrap"></pre><label>服务入口<input id="url" readonly style="width:100%"></label><div style="display:flex;gap:8px;margin-top:12px"><button id="copy" type="button">复制地址</button><a id="open" target="_blank" rel="noopener">查看 tileset.json</a></div></section>
+</main><script src="/assets/tiles3d.js" defer></script></body></html>

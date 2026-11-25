@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>3D Tiles 标准客户端验收</title>
+<link rel="stylesheet" href="node_modules/cesium/Build/Cesium/Widgets/widgets.css">
+<style>html,body,#earth{margin:0;width:100%;height:100%;overflow:hidden}#status{position:absolute;z-index:10;left:16px;top:16px;background:white;padding:14px;border-radius:6px;font:16px sans-serif}</style>
+<div id="earth"></div><div id="status">正在加载 Cesium…</div>
+<script src="node_modules/cesium/Build/Cesium/Cesium.js"></script><script>
+(async()=>{const status=document.querySelector('#status');try{
+const base=new URLSearchParams(location.search).get('base');
+const viewer=new Cesium.Viewer('earth',{baseLayer:false,geocoder:false,timeline:false,animation:false,baseLayerPicker:false,sceneModePicker:false,navigationHelpButton:false,homeButton:false,fullscreenButton:false,skyBox:false,skyAtmosphere:false});
+viewer.scene.globe.show=false;viewer.scene.backgroundColor=Cesium.Color.fromCssColorString('#172434');
+const tiles=await Cesium.Cesium3DTileset.fromUrl(base+'/3dtiles/demo/tileset.json');viewer.scene.primitives.add(tiles);
+tiles.tileFailed.addEventListener(e=>status.textContent='FAIL '+e.message);
+tiles.tileVisible.addEventListener(tile=>{if(tile.content.trianglesLength>0){status.textContent='PASS · Cesium '+Cesium.VERSION+' · 已加载并渲染 '+tile.content.trianglesLength+' 个三角形';status.dataset.pass='true';}});
+viewer.camera.viewBoundingSphere(tiles.boundingSphere,new Cesium.HeadingPitchRange(0,-0.7,250));viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+status.textContent='tileset 已解析，正在加载内容…';
+}catch(e){status.textContent='FAIL '+e.message;}})();
+</script>

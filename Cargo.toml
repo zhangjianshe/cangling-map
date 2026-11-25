@@ -4,6 +4,7 @@ members = [
     "crates/ogc-wms",
     "crates/ogc-wmts",
     "crates/map-core",
+    "crates/map-3dtiles",
     "crates/map-catalog",
     "crates/map-render",
     "crates/map-gpu",
@@ -45,7 +46,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs", "io-util", "sync"] }
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
 tracing = "0.1"
 rustybuzz = "0.20"
 ttf-parser = "0.25"

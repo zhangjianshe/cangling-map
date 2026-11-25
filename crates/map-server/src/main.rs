@@ -17,7 +17,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -66,6 +66,7 @@ mod imagery;
 mod leadership;
 mod placenames;
 mod terrain;
+mod tiles3d;
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -731,6 +732,8 @@ async fn main() -> anyhow::Result<()> {
     // Restrict cross-origin access to these routes; import/upload APIs retain
     // the default same-origin policy.
     let public_terrain = Router::new()
+        .route("/3dtiles/{id}/tileset.json", get(tiles3d::entry))
+        .route("/3dtiles/{id}/versions/{revision}/{*path}", get(tiles3d::asset))
         .route("/api/placenames/metadata", get(placenames::metadata))
         .route("/api/placenames/tiles/{z}/{x}/{y}", get(placenames::tile))
         .route("/api/admin/metadata", get(administration::metadata))
@@ -773,6 +776,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/style-assets", get(style_assets_page))
         .route("/metrics", get(metrics_page))
         .route("/settings/cache", get(cache_settings_page))
+        .route("/3dtiles", get(tiles3d_page))
+        .route("/assets/tiles3d.js", get(tiles3d_script))
+        .route("/api/3dtiles", get(tiles3d::list))
+        .route("/api/3dtiles/{id}", get(tiles3d::detail).put(tiles3d::register))
+        .route("/api/3dtiles/{id}/validate", post(tiles3d::inspect))
+        .route("/api/3dtiles/{id}/publish", post(tiles3d::publish))
+        .route("/api/3dtiles/{id}/disable", post(tiles3d::disable))
         .route("/terrain", get(terrain_page))
         .route("/assets/terrain.js", get(terrain_script))
         .route("/assets/terrain.css", get(terrain_styles))
@@ -1124,6 +1134,7 @@ fn management_page(template: &str, headers: &HeaderMap) -> Html<String> {
             1,
         );
     }
+    if !document.contains("href=\"/3dtiles\"") { document=document.replace("</nav>","<a href=\"/3dtiles\">◇ 3D Tiles</a></nav>"); }
     if !prefix.is_empty() {
         document = document
             .replace("href=\"/", &format!("href=\"{prefix}/"))
@@ -1167,6 +1178,8 @@ async fn metrics_page(headers: HeaderMap) -> Html<String> {
 async fn cache_settings_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/cache-settings.html"), &headers)
 }
+async fn tiles3d_page(headers: HeaderMap) -> Html<String> { management_page(include_str!("../web/tiles3d.html"), &headers) }
+async fn tiles3d_script() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/tiles3d.js")) }
 async fn terrain_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/terrain.html"), &headers)
 }

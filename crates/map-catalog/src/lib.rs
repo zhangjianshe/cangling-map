@@ -7,6 +7,8 @@ use sqlx::{sqlite::SqlitePoolOptions, FromRow, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod tiles3d;
+pub use tiles3d::Tiles3dDataset;
 mod terrain;
 pub use terrain::{DemAsset, DemDataset};
 mod placenames;
