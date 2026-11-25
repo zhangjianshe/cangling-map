@@ -33,3 +33,24 @@ jobs:
           echo '=== Default HTTPS port ==='
           curl -4 --noproxy '*' -v --connect-timeout 15 --max-time 22 -o /dev/null https://harbor.cangling.cn/v2/
           exit 0
+      - name: Go TLS and registry token endpoint
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cat > /tmp/probe.go <<'GO'
+          package main
+          import ("fmt";"net/http";"time";"runtime")
+          func main() {
+            fmt.Println(runtime.Version())
+            c := &http.Client{Timeout: 15*time.Second}
+            for _, u := range []string{"https://harbor.cangling.cn:22002/v2/", "https://harbor.cangling.cn:22002/service/token?service=harbor-registry", "https://soft.cangling.cn:22002/"} {
+              start:=time.Now(); r,e:=c.Get(u)
+              if e!=nil {fmt.Println(u,time.Since(start),e);continue}
+              fmt.Println(u,time.Since(start),r.Status);r.Body.Close()
+            }
+          }
+          GO
+          go build -o /tmp/probe /tmp/probe.go
+          /tmp/probe
+          GODEBUG=tlsmlkem=0 /tmp/probe
+          GODEBUG=tlskyber=0 /tmp/probe
