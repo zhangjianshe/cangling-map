@@ -129,71 +129,170 @@ pub(crate) struct DiscoveryQuery {
     id: Option<String>,
     limit: Option<usize>,
 }
-pub(crate) async fn discover(State(s): State<AppState>, Query(q): Query<DiscoveryQuery>) -> Result<Json<Value>, Error> {
-    let bbox = q.bbox.as_deref().map(|raw| {
-        let a = raw.split(',').map(str::parse::<f64>).collect::<Result<Vec<_>, _>>().map_err(bad)?;
-        if a.len()!=4 || !a.iter().all(|x|x.is_finite()) || a[0]< -180. || a[2]>180. || a[1]< -90. || a[3]>90. || a[0]>a[2] || a[1]>a[3] { return Err(bad("bbox须为西,南,东,北，不跨日期变更线")); }
-        Ok(a)
-    }).transpose()?;
+pub(crate) async fn discover(
+    State(s): State<AppState>,
+    Query(q): Query<DiscoveryQuery>,
+) -> Result<Json<Value>, Error> {
+    let bbox = q
+        .bbox
+        .as_deref()
+        .map(|raw| {
+            let a = raw
+                .split(',')
+                .map(str::parse::<f64>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(bad)?;
+            if a.len() != 4
+                || !a.iter().all(|x| x.is_finite())
+                || a[0] < -180.
+                || a[2] > 180.
+                || a[1] < -90.
+                || a[3] > 90.
+                || a[0] > a[2]
+                || a[1] > a[3]
+            {
+                return Err(bad("bbox须为西,南,东,北，不跨日期变更线"));
+            }
+            Ok(a)
+        })
+        .transpose()?;
     let Json(all) = list(State(s)).await?;
     let keyword = q.q.unwrap_or_default().to_lowercase();
-    if keyword.len()>512 {return Err(bad("查询过长"));}
+    if keyword.len() > 512 {
+        return Err(bad("查询过长"));
+    }
     let mut found = Vec::new();
     for d in all["datasets"].as_array().into_iter().flatten() {
-        let id=d["id"].as_str().unwrap_or_default();
-        let Some(rev)=d["revision"].as_str() else {continue};
-        if d["enabled"]!=true || q.id.as_deref().is_some_and(|v|v!=id) || !format!("{} {}",id,d["title"].as_str().unwrap_or_default()).to_lowercase().contains(&keyword) {continue;}
-        let path=root().join(id).join("versions").join(rev).join("tileset.json");
+        let id = d["id"].as_str().unwrap_or_default();
+        let Some(rev) = d["revision"].as_str() else {
+            continue;
+        };
+        if d["enabled"] != true
+            || q.id.as_deref().is_some_and(|v| v != id)
+            || !format!("{} {}", id, d["title"].as_str().unwrap_or_default())
+                .to_lowercase()
+                .contains(&keyword)
+        {
+            continue;
+        }
+        let path = root()
+            .join(id)
+            .join("versions")
+            .join(rev)
+            .join("tileset.json");
         // Read only the bounded entry document; never enumerate payloads to discover a dataset.
-        let doc = if tokio::fs::metadata(&path).await.map_err(internal)?.len()<=4*1024*1024 {
-            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.map_err(internal)?).map_err(internal)?
-        } else { Value::Null };
-        let bounds=discovery_bounds(&doc["root"]);
-        if let Some(b)=&bbox {if !bounds.as_ref().is_some_and(|a|a[0]<=b[2] && a[2]>=b[0] && a[1]<=b[3] && a[3]>=b[1]) {continue;}}
+        let doc = if tokio::fs::metadata(&path).await.map_err(internal)?.len() <= 4 * 1024 * 1024 {
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.map_err(internal)?)
+                .map_err(internal)?
+        } else {
+            Value::Null
+        };
+        let bounds = discovery_bounds(&doc["root"]);
+        if let Some(b) = &bbox {
+            if !bounds
+                .as_ref()
+                .is_some_and(|a| a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1])
+            {
+                continue;
+            }
+        }
         found.push(json!({"id":id,"name":d["title"],"type":"3dtiles","version":rev,"updatedAt":d["updated_at"],"crs":"EPSG:4326","bounds":bounds,"boundsKind":"boundingVolumeEnvelope","tilesetPath":format!("3dtiles/{id}/versions/{rev}/tileset.json"),"metadata":doc["asset"]["extras"]}));
     }
-    let total=found.len(); found.truncate(q.limit.unwrap_or(50).clamp(1,100));
-    Ok(Json(json!({"datasets":found,"total":total,"truncated":total>found.len()})))
+    let total = found.len();
+    found.truncate(q.limit.unwrap_or(50).clamp(1, 100));
+    Ok(Json(
+        json!({"datasets":found,"total":total,"truncated":total>found.len()}),
+    ))
 }
 /// Convert small ECEF box volumes (including root transform) to a geographic envelope.
 /// Unsupported/planetary volumes remain unknown rather than inventing a fly-to location.
-fn discovery_bounds(root: &Value) -> Option<[f64;4]> {
-    if let Some(a)=root["boundingVolume"]["region"].as_array() {
-        let b=[a.first()?.as_f64()?.to_degrees(),a.get(1)?.as_f64()?.to_degrees(),a.get(2)?.as_f64()?.to_degrees(),a.get(3)?.as_f64()?.to_degrees()];
-        return (b.iter().all(|v|v.is_finite()) && b[0]<=b[2] && b[1]<=b[3]).then_some(b);
+fn discovery_bounds(root: &Value) -> Option<[f64; 4]> {
+    if let Some(a) = root["boundingVolume"]["region"].as_array() {
+        let b = [
+            a.first()?.as_f64()?.to_degrees(),
+            a.get(1)?.as_f64()?.to_degrees(),
+            a.get(2)?.as_f64()?.to_degrees(),
+            a.get(3)?.as_f64()?.to_degrees(),
+        ];
+        return (b.iter().all(|v| v.is_finite()) && b[0] <= b[2] && b[1] <= b[3]).then_some(b);
     }
     let sphere_box = root["boundingVolume"]["sphere"].as_array().and_then(|a| {
-        if a.len()!=4 {return None;} let r=a[3].as_f64()?;
-        Some(json!([a[0],a[1],a[2],r,0,0,0,r,0,0,0,r]))
+        if a.len() != 4 {
+            return None;
+        }
+        let r = a[3].as_f64()?;
+        Some(json!([a[0], a[1], a[2], r, 0, 0, 0, r, 0, 0, 0, r]))
     });
-    let a=root["boundingVolume"].get("box").or(sphere_box.as_ref())?.as_array()?;
-    if a.len()!=12{return None;}
-    let a=a.iter().map(Value::as_f64).collect::<Option<Vec<_>>>()?;
-    let matrix = root.get("transform").map(|v|v.as_array()?.iter().map(Value::as_f64).collect::<Option<Vec<_>>>()).unwrap_or(Some(vec![1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.]))?;
-    if matrix.len()!=16{return None;}
-    let mut b=[180_f64,90_f64,-180_f64,-90_f64];
-    for mask in 0..8 {
-        let mut p=[a[0],a[1],a[2]];
-        for axis in 0..3 {for j in 0..3 {p[j]+=a[3+axis*3+j]*if mask&(1<<axis)==0 {-1.} else {1.};}}
-        let w:Vec<f64>=(0..3).map(|j|matrix[j]*p[0]+matrix[4+j]*p[1]+matrix[8+j]*p[2]+matrix[12+j]).collect();
-        let horizontal=w[0].hypot(w[1]);
-        if !(5_000_000. ..8_000_000.).contains(&horizontal.hypot(w[2])) {return None;}
-        let lon=w[1].atan2(w[0]).to_degrees();
-        let mut lat=w[2].atan2(horizontal*(1.-0.00669437999014));
-        for _ in 0..8 {let n=6378137./(1.-0.00669437999014*lat.sin().powi(2)).sqrt();lat=(w[2]+0.00669437999014*n*lat.sin()).atan2(horizontal);}
-        let lat=lat.to_degrees();b[0]=b[0].min(lon);b[1]=b[1].min(lat);b[2]=b[2].max(lon);b[3]=b[3].max(lat);
+    let a = root["boundingVolume"]
+        .get("box")
+        .or(sphere_box.as_ref())?
+        .as_array()?;
+    if a.len() != 12 {
+        return None;
     }
-    (b.iter().all(|v|v.is_finite()) && b[2]-b[0]<10. && b[3]-b[1]<10.).then_some(b)
+    let a = a.iter().map(Value::as_f64).collect::<Option<Vec<_>>>()?;
+    let matrix = root
+        .get("transform")
+        .map(|v| {
+            v.as_array()?
+                .iter()
+                .map(Value::as_f64)
+                .collect::<Option<Vec<_>>>()
+        })
+        .unwrap_or(Some(vec![
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ]))?;
+    if matrix.len() != 16 {
+        return None;
+    }
+    let mut b = [180_f64, 90_f64, -180_f64, -90_f64];
+    for mask in 0..8 {
+        let mut p = [a[0], a[1], a[2]];
+        for axis in 0..3 {
+            for j in 0..3 {
+                p[j] += a[3 + axis * 3 + j] * if mask & (1 << axis) == 0 { -1. } else { 1. };
+            }
+        }
+        let w: Vec<f64> = (0..3)
+            .map(|j| {
+                matrix[j] * p[0] + matrix[4 + j] * p[1] + matrix[8 + j] * p[2] + matrix[12 + j]
+            })
+            .collect();
+        let horizontal = w[0].hypot(w[1]);
+        if !(5_000_000. ..8_000_000.).contains(&horizontal.hypot(w[2])) {
+            return None;
+        }
+        let lon = w[1].atan2(w[0]).to_degrees();
+        let mut lat = w[2].atan2(horizontal * (1. - 0.00669437999014));
+        for _ in 0..8 {
+            let n = 6378137. / (1. - 0.00669437999014 * lat.sin().powi(2)).sqrt();
+            lat = (w[2] + 0.00669437999014 * n * lat.sin()).atan2(horizontal);
+        }
+        let lat = lat.to_degrees();
+        b[0] = b[0].min(lon);
+        b[1] = b[1].min(lat);
+        b[2] = b[2].max(lon);
+        b[3] = b[3].max(lat);
+    }
+    (b.iter().all(|v| v.is_finite()) && b[2] - b[0] < 10. && b[3] - b[1] < 10.).then_some(b)
 }
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
-    #[test] fn geographic_and_ecef_bounds() {
-        let b=discovery_bounds(&json!({"boundingVolume":{"region":[1.,0.5,1.1,0.6,0,100]}})).unwrap();
-        assert!((b[0]-1_f64.to_degrees()).abs()<1e-8);
-        let b=discovery_bounds(&json!({"boundingVolume":{"box":[6378137.,0.,0.,10.,0.,0.,0.,100.,0.,0.,0.,100.]}})).unwrap();
-        assert!(b[0]<0. && b[2]>0. && b[1]<0. && b[3]>0.);
-        assert!(discovery_bounds(&json!({"boundingVolume":{"box":[0,0,0,1,0,0,0,1,0,0,0,1]}})).is_none());
+    #[test]
+    fn geographic_and_ecef_bounds() {
+        let b =
+            discovery_bounds(&json!({"boundingVolume":{"region":[1.,0.5,1.1,0.6,0,100]}})).unwrap();
+        assert!((b[0] - 1_f64.to_degrees()).abs() < 1e-8);
+        let b = discovery_bounds(
+            &json!({"boundingVolume":{"box":[6378137.,0.,0.,10.,0.,0.,0.,100.,0.,0.,0.,100.]}}),
+        )
+        .unwrap();
+        assert!(b[0] < 0. && b[2] > 0. && b[1] < 0. && b[3] > 0.);
+        assert!(
+            discovery_bounds(&json!({"boundingVolume":{"box":[0,0,0,1,0,0,0,1,0,0,0,1]}}))
+                .is_none()
+        );
     }
 }
 #[derive(Deserialize)]

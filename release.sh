@@ -40,8 +40,8 @@ sed -i "0,/^version = \"${current}\"/s//version = \"${new}\"/" Cargo.toml
 cargo check --workspace
 
 git add Cargo.toml Cargo.lock
-git commit -m "Release v${new}"
-git tag -a "v${new}" -m "Release v${new}"
+git commit -m "发布 v${new}"
+git tag -a "v${new}" -m "发布 v${new}"
 
 remote="${1:-origin}"
 branch="$(git rev-parse --abbrev-ref HEAD)"

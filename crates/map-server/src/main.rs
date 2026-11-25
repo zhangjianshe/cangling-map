@@ -64,11 +64,10 @@ use tower_http::{
 mod administration;
 mod imagery;
 mod leadership;
+mod mcp;
 mod placenames;
 mod terrain;
 mod tiles3d;
-mod mcp;
-
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -638,7 +637,9 @@ async fn main() -> anyhow::Result<()> {
     let catalog = SqliteCatalog::connect(&database_url)
         .await
         .context("failed to initialize catalog")?;
-    tiles3d::migrate(&catalog).await.context("failed to migrate dataset publication databases")?;
+    tiles3d::migrate(&catalog)
+        .await
+        .context("failed to migrate dataset publication databases")?;
     let imagery_database_url = std::env::var("IMAGERY_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://imagery.db?mode=rwc".into());
     let imagery_index_database_url = std::env::var("IMAGERY_INDEX_DATABASE_URL")
@@ -737,7 +738,10 @@ async fn main() -> anyhow::Result<()> {
     let public_terrain = Router::new()
         .route("/api/3dtiles/discover", get(tiles3d::discover))
         .route("/3dtiles/{id}/tileset.json", get(tiles3d::entry))
-        .route("/3dtiles/{id}/versions/{revision}/{*path}", get(tiles3d::asset))
+        .route(
+            "/3dtiles/{id}/versions/{revision}/{*path}",
+            get(tiles3d::asset),
+        )
         .route("/api/placenames/metadata", get(placenames::metadata))
         .route("/api/placenames/tiles/{z}/{x}/{y}", get(placenames::tile))
         .route("/api/admin/metadata", get(administration::metadata))
@@ -754,7 +758,11 @@ async fn main() -> anyhow::Result<()> {
                 .allow_headers(Any),
         );
     let app = Router::new()
-        .merge(Router::new().route("/mcp", post(mcp::post).get(mcp::get)).layer(DefaultBodyLimit::max(16 * 1024)))
+        .merge(
+            Router::new()
+                .route("/mcp", post(mcp::post).get(mcp::get))
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/", get(metrics_page))
         .route("/catalog", get(index))
         .route("/imagery", get(imagery_page))
@@ -784,7 +792,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/3dtiles", get(tiles3d_page))
         .route("/assets/tiles3d.js", get(tiles3d_script))
         .route("/api/3dtiles", get(tiles3d::list))
-        .route("/api/3dtiles/{id}", get(tiles3d::detail).put(tiles3d::register))
+        .route(
+            "/api/3dtiles/{id}",
+            get(tiles3d::detail).put(tiles3d::register),
+        )
         .route("/api/3dtiles/{id}/validate", post(tiles3d::inspect))
         .route("/api/3dtiles/{id}/publish", post(tiles3d::publish))
         .route("/api/3dtiles/{id}/disable", post(tiles3d::disable))
@@ -1139,7 +1150,9 @@ fn management_page(template: &str, headers: &HeaderMap) -> Html<String> {
             1,
         );
     }
-    if !document.contains("href=\"/3dtiles\"") { document=document.replace("</nav>","<a href=\"/3dtiles\">◇ 3D Tiles</a></nav>"); }
+    if !document.contains("href=\"/3dtiles\"") {
+        document = document.replace("</nav>", "<a href=\"/3dtiles\">◇ 3D Tiles</a></nav>");
+    }
     if !prefix.is_empty() {
         document = document
             .replace("href=\"/", &format!("href=\"{prefix}/"))
@@ -1183,8 +1196,18 @@ async fn metrics_page(headers: HeaderMap) -> Html<String> {
 async fn cache_settings_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/cache-settings.html"), &headers)
 }
-async fn tiles3d_page(headers: HeaderMap) -> Html<String> { management_page(include_str!("../web/tiles3d.html"), &headers) }
-async fn tiles3d_script() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")],include_str!("../web/tiles3d.js")) }
+async fn tiles3d_page(headers: HeaderMap) -> Html<String> {
+    management_page(include_str!("../web/tiles3d.html"), &headers)
+}
+async fn tiles3d_script() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../web/tiles3d.js"),
+    )
+}
 async fn terrain_page(headers: HeaderMap) -> Html<String> {
     management_page(include_str!("../web/terrain.html"), &headers)
 }
