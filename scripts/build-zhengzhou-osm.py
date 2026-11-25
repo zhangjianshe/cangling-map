@@ -3,7 +3,7 @@
 Dependencies: numpy shapely pyproj mapbox-earcut pillow. Raw inputs are cached.
 This is an OSM-derived preview, not a surveyed building model.
 """
-import json, math, struct, re, hashlib, collections, argparse
+import json, math, struct, re, hashlib, collections, argparse, io
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.request import urlopen
@@ -125,15 +125,23 @@ for f in features:
  out_features.append({'type':'Feature','id':f['id'],'geometry':mapping(transform(inv,g)),'properties':{k:v for k,v in f.items() if k!='geometry'}})
 
 def cross2(a,b):return a[0]*b[1]-a[1]*b[0]
-def glb(fs):
- positions=[];normals=[]
+# Original procedural facade; no photographed facade or third-party texture.
+facade=Image.new('RGBA',(64,64),(210,195,170,255))
+from PIL import ImageDraw
+pen=ImageDraw.Draw(facade);pen.rectangle((13,11,51,50),fill=(55,120,170,255))
+pen.rectangle((30,11,33,50),fill=(235,240,245,255));pen.rectangle((13,29,51,32),fill=(235,240,245,255))
+facade_bytes=io.BytesIO();facade.save(facade_bytes,format='PNG');facade_png=facade_bytes.getvalue()
+def glb(fs,textured=True):
+ positions=[];normals=[];uvs=[];wall_indices=[];roof_indices=[]
  def xyz(x,y,z):
   lon,lat=inv(x,y);v=rotation.T@(np.array(ecef.transform(lon,lat,z))-origin)
   return np.array([v[0],v[2],-v[1]]) # glTF Y-up -> tile ENU Z-up in renderer
- def triangle(a,b,c):
+ def triangle(a,b,c,uv=None):
   n=np.cross(b-a,c-a);length=np.linalg.norm(n)
   if length<1e-8:return
-  n/=length;positions.extend([a,b,c]);normals.extend([n,n,n])
+  n/=length
+  (wall_indices if uv else roof_indices).extend(range(len(positions),len(positions)+3))
+  positions.extend([a,b,c]);normals.extend([n,n,n]);uvs.extend(uv or [(0.,0.)]*3)
  for f in fs:
   for p in polygons(f['geometry']):
    p=orient(p,sign=1);rings=[np.asarray(p.exterior.coords[:-1])]+[np.asarray(r.coords[:-1]) for r in p.interiors]
@@ -150,11 +158,34 @@ def glb(fs):
    for ring in rings:
     for a,b in zip(ring,np.roll(ring,-1,axis=0)):
      aa,bb=xyz(*a,base),xyz(*b,base);at,bt=xyz(*a,top),xyz(*b,top)
-     triangle(aa,bb,bt);triangle(aa,bt,at)
+     width=float(np.linalg.norm(b-a))/3.
+     floors=max(1.,(f['height']-f['min_height'])/3.)
+     # glTF image V points down; level height is estimated using the same 3 m rule.
+     triangle(aa,bb,bt,[(0.,floors),(width,floors),(width,0.)]);triangle(aa,bt,at,[(0.,floors),(width,0.),(0.,0.)])
  pos=np.array(positions,dtype='<f4');norm=np.array(normals,dtype='<f4');assert np.isfinite(pos).all() and np.isfinite(norm).all()
  assert len(pos)<500000
  binary=pos.tobytes()+norm.tobytes()
  doc={'asset':{'version':'2.0','copyright':'© OpenStreetMap contributors; ODbL 1.0','generator':'Cangling OSM preview'},'buffers':[{'byteLength':len(binary)}],'bufferViews':[{'buffer':0,'byteOffset':0,'byteLength':pos.nbytes},{'buffer':0,'byteOffset':pos.nbytes,'byteLength':norm.nbytes}],'accessors':[{'bufferView':0,'componentType':5126,'count':len(pos),'type':'VEC3','min':pos.min(axis=0).tolist(),'max':pos.max(axis=0).tolist()},{'bufferView':1,'componentType':5126,'count':len(norm),'type':'VEC3'}],'materials':[{'doubleSided':True,'pbrMetallicRoughness':{'baseColorFactor':[.8,.83,.86,1],'metallicFactor':0,'roughnessFactor':.9}}],'meshes':[{'primitives':[{'attributes':{'POSITION':0,'NORMAL':1},'material':0}]}],'nodes':[{'mesh':0}],'scenes':[{'nodes':[0]}],'scene':0,'extras':{'osmIds':[f['id'] for f in fs]}}
+ if textured:
+  binary=bytearray(binary)
+  def append(raw):
+   offset=len(binary);binary.extend(raw);binary.extend(b'\0'*(-len(binary)%4))
+   doc['bufferViews'].append({'buffer':0,'byteOffset':offset,'byteLength':len(raw)})
+   return len(doc['bufferViews'])-1
+  uv=np.asarray(uvs,dtype='<f4');assert np.isfinite(uv).all()
+  doc['accessors'].append({'bufferView':append(uv.tobytes()),'componentType':5126,'count':len(uv),'type':'VEC2'})
+  doc['images']=[{'bufferView':append(facade_png),'mimeType':'image/png'}]
+  doc['samplers']=[{'wrapS':10497,'wrapT':10497,'magFilter':9729,'minFilter':9987}]
+  doc['textures']=[{'source':0,'sampler':0}]
+  doc['materials']=[{'doubleSided':True,'pbrMetallicRoughness':{'baseColorFactor':[.4,.43,.46,1],'metallicFactor':0,'roughnessFactor':1}}, {'doubleSided':True,'pbrMetallicRoughness':{'baseColorTexture':{'index':0},'metallicFactor':0,'roughnessFactor':.9}}]
+  primitives=[]
+  for material,indices in [(0,roof_indices),(1,wall_indices)]:
+   view=append(np.asarray(indices,dtype='<u4').tobytes());accessor=len(doc['accessors'])
+   doc['accessors'].append({'bufferView':view,'componentType':5125,'count':len(indices),'type':'SCALAR'})
+   primitives.append({'attributes':{'POSITION':0,'NORMAL':1,'TEXCOORD_0':2},'indices':accessor,'material':material})
+  doc['meshes'][0]['primitives']=primitives;doc['buffers'][0]['byteLength']=len(binary)
+  doc['extras']['appearance']='procedural windows, 3 m repeat; not surveyed facade'
+  binary=bytes(binary)
  raw=json.dumps(doc,separators=(',',':')).encode();raw+=b' '*(-len(raw)%4)
  data=b'glTF'+struct.pack('<II',2,28+len(raw)+len(binary))+struct.pack('<I4s',len(raw),b'JSON')+raw+struct.pack('<I4s',len(binary),b'BIN\0')+binary
  # Bounding volume in tile ENU, before glTF Y-up conversion.
@@ -187,7 +218,7 @@ lod_stats['high']={'vertices':vertices,'files':len(children),'toleranceMetres':0
 coarse={}
 for level,tolerance,error_budget in [('low',20.,40.),('medium',3.,6.)]:
  fs,error=simplify_features(features,tolerance)
- data,bv,count=glb(fs);name=f'buildings-{level}.glb';(source_dir/name).write_bytes(data)
+ data,bv,count=glb(fs,textured=False);name=f'buildings-{level}.glb';(source_dir/name).write_bytes(data)
  coarse[level]={'boundingVolume':bv,'geometricError':error_budget,'refine':'REPLACE','content':{'uri':name},'extras':{'lod':level}}
  lod_stats[level]={'vertices':count,'files':1,'bytes':len(data),'toleranceMetres':tolerance,'measuredErrorMetres':error,'geometricError':error_budget}
  assert error<=error_budget and {f['id'] for f in fs}=={f['id'] for f in features}
@@ -206,7 +237,7 @@ coarse['medium']['children']=children
 root=coarse['low'];root['boundingVolume']=full_bounds;root['children']=[coarse['medium']]
 root['transform']=world.flatten(order='F').tolist()
 counts=dict(collections.Counter(f['height_source'] for f in features))
-summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children)+2,'vertices':vertices,'lod':lod_stats,'skipped':skip,'terrain':meta,'heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
+summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children)+2,'vertices':vertices,'lod':lod_stats,'skipped':skip,'terrain':meta,'appearance':'High LOD: procedural windows and plain roof; low/medium: plain material; no surveyed facade','heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
 (source_dir/'tileset.json').write_text(json.dumps({'asset':{'version':'1.1','copyright':'© OpenStreetMap contributors; ODbL 1.0'},'geometricError':root['geometricError'],'root':root,'extras':{'heightSources':counts,'attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','bounds':'3km x 3km local AEQD square; WGS84','lod':lod_stats}},ensure_ascii=False,indent=2))
 (ROOT/'buildings.geojson').write_text(json.dumps({'type':'FeatureCollection','features':out_features},ensure_ascii=False))
 (ROOT/'report.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2))

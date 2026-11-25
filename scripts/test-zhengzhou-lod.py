@@ -24,6 +24,18 @@ def walk(node,parent=None):
    if is_normal:assert abs(sum(x*x for x in v)-1)<1e-5
    else:
     enu=[v[0],-v[2],v[1]];assert all(lo[j]-1e-3<=enu[j]<=hi[j]+1e-3 for j in range(3))
+ if level=='high':
+  assert len(g['meshes'][0]['primitives'])==2
+  assert g['samplers'][0]['wrapS']==10497 and g['samplers'][0]['wrapT']==10497
+  image=g['bufferViews'][g['images'][0]['bufferView']];assert binary[image['byteOffset']:image['byteOffset']+8]==b'\x89PNG\r\n\x1a\n'
+  referenced=[]
+  for part in g['meshes'][0]['primitives']:
+   a=g['accessors'][part['indices']];v=g['bufferViews'][a['bufferView']]
+   referenced.extend(struct.unpack_from('<'+'I'*a['count'],binary,v['byteOffset']))
+  assert sorted(referenced)==list(range(pos['count']))
+  uv=g['accessors'][primitive['attributes']['TEXCOORD_0']];v=g['bufferViews'][uv['bufferView']]
+  assert uv['count']==pos['count'];assert all(math.isfinite(x) for x in struct.unpack_from('<'+'f'*uv['count']*2,binary,v['byteOffset']))
+ else:assert 'images' not in g
  counts[level]=counts.get(level,0)+pos['count'];ids.setdefault(level,set()).update(g['extras']['osmIds'])
  for child in node.get('children',[]):
   assert node['refine']=='REPLACE';walk(child,node)

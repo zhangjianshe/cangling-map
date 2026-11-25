@@ -87,3 +87,15 @@ python scripts/test-zhengzhou-lod.py --data-root /path/to/zhengzhou-cbd-osm
 验证三级顶点递增、同一组OSM对象、单位法线、所有GLB顶点落入包围体、
 父包围体包含子包围体、REPLACE树和资源预算。Map validate/publish通过。
 原始单级发布版本继续保留，可按原版本URL访问。
+
+## 程序化立面贴图版本
+
+本机独立数据集 `zhengzhou-cbd-textured`：
+`http://127.0.0.1:4310/3dtiles/zhengzhou-cbd-textured/tileset.json`。
+发布版本 `c075386bf001100f28db4f99b61c0ec9a8d19f1390a43439d8f622a1304fb33f`。
+
+近景墙面按每 3 米一个窗格单元生成重复 UV，窗格图片为原创 64×64 PNG，内嵌在 GLB 中；屋顶独立纯色材质。楼层/高度沿用原有标签与估算规则，不能视为真实立面照片。低、中 LOD 使用原简化轮廓及纯色材质，减少远处纹理采样和加载开销。
+
+保留 485 个 OSM 对象、原始建筑位置、高度、内院和所有三级顶点数，仍为 30 个几何资源、31 个发布文件。近景改为屋顶/墙面两个 primitive，共享 POSITION/NORMAL/UV，使用互不重叠的索引覆盖原有全部三角形。
+
+`test-zhengzhou-lod.py` 新增 PNG、重复采样、有限 UV、索引完整覆盖和低中景无贴图校验。Map 校验、版本发布通过；原 `zhengzhou-cbd-osm` 发布版本不变。
