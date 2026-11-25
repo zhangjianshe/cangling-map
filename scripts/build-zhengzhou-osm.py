@@ -218,7 +218,7 @@ lod_stats['high']={'vertices':vertices,'files':len(children),'toleranceMetres':0
 coarse={}
 for level,tolerance,error_budget in [('low',20.,40.),('medium',3.,6.)]:
  fs,error=simplify_features(features,tolerance)
- data,bv,count=glb(fs,textured=False);name=f'buildings-{level}.glb';(source_dir/name).write_bytes(data)
+ data,bv,count=glb(fs,textured=True);name=f'buildings-{level}.glb';(source_dir/name).write_bytes(data)
  coarse[level]={'boundingVolume':bv,'geometricError':error_budget,'refine':'REPLACE','content':{'uri':name},'extras':{'lod':level}}
  lod_stats[level]={'vertices':count,'files':1,'bytes':len(data),'toleranceMetres':tolerance,'measuredErrorMetres':error,'geometricError':error_budget}
  assert error<=error_budget and {f['id'] for f in fs}=={f['id'] for f in features}
@@ -237,7 +237,7 @@ coarse['medium']['children']=children
 root=coarse['low'];root['boundingVolume']=full_bounds;root['children']=[coarse['medium']]
 root['transform']=world.flatten(order='F').tolist()
 counts=dict(collections.Counter(f['height_source'] for f in features))
-summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children)+2,'vertices':vertices,'lod':lod_stats,'skipped':skip,'terrain':meta,'appearance':'High LOD: procedural windows and plain roof; low/medium: plain material; no surveyed facade','heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
+summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children)+2,'vertices':vertices,'lod':lod_stats,'skipped':skip,'terrain':meta,'appearance':'All LODs: consistent procedural windows and plain roof; no surveyed facade','heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
 (source_dir/'tileset.json').write_text(json.dumps({'asset':{'version':'1.1','copyright':'© OpenStreetMap contributors; ODbL 1.0'},'geometricError':root['geometricError'],'root':root,'extras':{'heightSources':counts,'attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','bounds':'3km x 3km local AEQD square; WGS84','lod':lod_stats}},ensure_ascii=False,indent=2))
 (ROOT/'buildings.geojson').write_text(json.dumps({'type':'FeatureCollection','features':out_features},ensure_ascii=False))
 (ROOT/'report.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2))

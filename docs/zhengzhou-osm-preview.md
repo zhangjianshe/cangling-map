@@ -99,3 +99,7 @@ python scripts/test-zhengzhou-lod.py --data-root /path/to/zhengzhou-cbd-osm
 保留 485 个 OSM 对象、原始建筑位置、高度、内院和所有三级顶点数，仍为 30 个几何资源、31 个发布文件。近景改为屋顶/墙面两个 primitive，共享 POSITION/NORMAL/UV，使用互不重叠的索引覆盖原有全部三角形。
 
 `test-zhengzhou-lod.py` 新增 PNG、重复采样、有限 UV、索引完整覆盖和低中景无贴图校验。Map 校验、版本发布通过；原 `zhengzhou-cbd-osm` 发布版本不变。
+
+### 旋转时灰色回退修复
+
+后续版本 `41e7f03a16ee19e3df29498d8e2fa070170c0449658e09d2d4adbcf76101bffe` 已将 low/medium 同样改为屋顶和立面贴图，避免 REPLACE 子节点加载期间切回纯灰色父级。仍为相同 485 对象和三级几何顶点数；内嵌图片可由 Earth 纹理缓存复用。稳定入口不变，旧发布版本保留。
