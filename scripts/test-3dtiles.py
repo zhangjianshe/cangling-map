@@ -48,6 +48,22 @@ with tempfile.TemporaryDirectory(prefix='map-3dtiles-') as temp:
         assert api('/api/3dtiles/discover?q=missing')['total']==0
         req('/api/3dtiles/discover?bbox=nan,0,1,1',status=400)
         assert req('/api/3dtiles/discover',headers={'Origin':'http://localhost:4301'})[1]['Access-Control-Allow-Origin']=='*'
+        mcp_headers={'Accept':'application/json, text/event-stream','MCP-Protocol-Version':'2025-06-18'}
+        def rpc(method,params=None):
+            return api('/mcp','POST',{'jsonrpc':'2.0','id':7,'method':method,'params':params or {}},headers=mcp_headers)
+        assert rpc('initialize',{'protocolVersion':'2025-06-18','capabilities':{},'clientInfo':{'name':'test','version':'1'}})['result']['capabilities']['tools']=={'listChanged':False}
+        req('/mcp','POST',{'jsonrpc':'2.0','method':'notifications/initialized'},headers=mcp_headers,status=202)
+        assert len(rpc('tools/list')['result']['tools'])==2
+        data=rpc('tools/call',{'name':'get_3d_dataset','arguments':{'datasetId':'demo'}})['result'];assert data['structuredContent']['datasets'][0]['version']==revision and not data['isError']
+        assert rpc('tools/call',{'name':'get_3d_dataset','arguments':{'datasetId':'absent'}})['result']['isError']
+        assert rpc('tools/call',{'name':'get_3d_dataset','arguments':{'datasetId':'../secret'}})['error']['code']==-32602
+        assert rpc('tools/call',{'name':'delete_dataset','arguments':{}})['error']['code']==-32602
+        assert rpc('not/a/method')['error']['code']==-32601
+        req('/mcp',status=405)
+        req('/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'ping','params':{'padding':'x'*17000}},headers=mcp_headers,status=413)
+        req('/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'ping'},headers={**mcp_headers,'Origin':'https://untrusted.invalid'},status=403)
+        req('/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'ping'},headers={**mcp_headers,'MCP-Protocol-Version':'invalid'},status=400)
+        req('/mcp','POST',{'jsonrpc':'2.0','id':1,'method':'ping'},status=406)
         body,headers,resolved=req('/3dtiles/demo/tileset.json');assert json.loads(body)['root']['content']['uri']==f'versions/{revision}/model.glb' and resolved.endswith('/3dtiles/demo/tileset.json')
         body,headers,_=req(prefix+'/model.glb',headers={'Origin':'http://localhost:4301'});assert body==glb and headers['Access-Control-Allow-Origin']=='*' and headers['Content-Type']=='model/gltf-binary'
         req(prefix+'/model.glb',headers={'If-None-Match':headers['ETag']},status=304)

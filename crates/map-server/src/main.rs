@@ -67,6 +67,7 @@ mod leadership;
 mod placenames;
 mod terrain;
 mod tiles3d;
+mod mcp;
 
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
@@ -753,6 +754,7 @@ async fn main() -> anyhow::Result<()> {
                 .allow_headers(Any),
         );
     let app = Router::new()
+        .merge(Router::new().route("/mcp", post(mcp::post).get(mcp::get)).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/", get(metrics_page))
         .route("/catalog", get(index))
         .route("/imagery", get(imagery_page))
