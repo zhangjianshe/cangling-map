@@ -90,3 +90,14 @@ python3 -m http.server 4318 --bind 127.0.0.1 --directory /tmp/cangling-tiles3d-c
 本机回归：`python3 scripts/test-3dtiles.py` 覆盖旧库迁移、旧版本保留、停用后重启、空全局库目录发现，以及失效 Tile 地址下的直接读取。
 
 本次验证：Map 服务端 30 项测试、catalog 11 项测试、隔离 HTTP 发布/迁移回归通过；Keeper Earth 传输与桥接测试通过。没有改动远端部署，也未进行浏览器视觉验收。
+
+## 智能体公开数据集目录
+
+`GET /api/3dtiles/discover` 支持 `q`（名称/ID子串）、`id`（精确ID）、
+`bbox`（WGS84西,南,东,北，不跨日期变更线）、`limit`（默认50，最多100）。
+返回 `datasets/total/truncated`，仅包含启用的已发布版本。
+字段为 id、name、type=3dtiles、version、updatedAt、crs、bounds、boundsKind、tilesetPath、metadata。
+`tilesetPath` 相对服务根目录，保留调用方反向代理前缀；版本固定，不能用本地磁盘路径访问。
+metadata来自asset.extras，不保证含有来源/精度信息，不应据此猜测未知属性。
+范围由根region或小范围box/sphere估算（含根transform），未知范围为null，空间筛选排除未知范围。
+目录不是建筑属性查询服务；未来逐栋查询应使用稳定feature ID和单独的属性索引。

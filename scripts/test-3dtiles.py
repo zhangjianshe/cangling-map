@@ -40,6 +40,14 @@ with tempfile.TemporaryDirectory(prefix='map-3dtiles-') as temp:
         req('/api/3dtiles/demo','PUT',{'title':'bad'},headers={'Sec-Fetch-Site':'cross-site'},status=403)
         manifest=api('/api/3dtiles/demo/validate','POST');assert manifest['tile_count']==1 and len(manifest['files'])==2
         publication=api('/api/3dtiles/demo/publish','POST');revision=publication['manifest']['revision'];prefix='/3dtiles/demo/versions/'+revision
+        catalog=api('/api/3dtiles/discover?id=demo');item=catalog['datasets'][0]
+        assert item['version']==revision and item['name']=='三维测试' and item['bounds'][0]<0<item['bounds'][2]
+        assert 'source' not in item and item['tilesetPath']==prefix.lstrip('/')+'/tileset.json'
+        assert api('/api/3dtiles/discover?bbox=-1,-1,1,1')['total']==1
+        assert api('/api/3dtiles/discover?bbox=100,30,101,31')['total']==0
+        assert api('/api/3dtiles/discover?q=missing')['total']==0
+        req('/api/3dtiles/discover?bbox=nan,0,1,1',status=400)
+        assert req('/api/3dtiles/discover',headers={'Origin':'http://localhost:4301'})[1]['Access-Control-Allow-Origin']=='*'
         body,headers,resolved=req('/3dtiles/demo/tileset.json');assert json.loads(body)['root']['content']['uri']==f'versions/{revision}/model.glb' and resolved.endswith('/3dtiles/demo/tileset.json')
         body,headers,_=req(prefix+'/model.glb',headers={'Origin':'http://localhost:4301'});assert body==glb and headers['Access-Control-Allow-Origin']=='*' and headers['Content-Type']=='model/gltf-binary'
         req(prefix+'/model.glb',headers={'If-None-Match':headers['ETag']},status=304)
@@ -88,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix='map-3dtiles-') as temp:
         start();assert api('/api/3dtiles/demo')['dataset']['revision']==rev2
         assert req(prefix+'/model.glb')[0]==glb
         # Restart must not resurrect a locally disabled dataset from legacy records.
-        api('/api/3dtiles/demo/disable','POST');proc.terminate();proc.wait(10);start()
+        api('/api/3dtiles/demo/disable','POST');assert api('/api/3dtiles/discover')['total']==0;proc.terminate();proc.wait(10);start()
         req('/3dtiles/demo/tileset.json',status=404)
         api('/api/3dtiles/demo/publish','POST')
         # A different global catalog discovers the complete dataset directory.
@@ -104,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='map-3dtiles-') as temp:
             print('BROWSER_BASE='+base,flush=True)
             Path('/tmp/cangling-tiles3d-browser-base').write_text(base)
             input('Press Enter to complete verification and clean up\n')
-        api('/api/3dtiles/demo/disable','POST');req('/3dtiles/demo/tileset.json',status=404);req(prefix+'/model.glb',status=404)
+        api('/api/3dtiles/demo/disable','POST');assert api('/api/3dtiles/discover')['total']==0;req('/3dtiles/demo/tileset.json',status=404);req(prefix+'/model.glb',status=404)
         body=req('/3dtiles',headers={'X-Forwarded-Prefix':'/map'})[0].decode();assert '/map/assets/tiles3d.js' in body and '/map/3dtiles' in body
         print('PASS 3D Tiles: validation, publication, nested references, immutable versions, Range/HEAD/ETag/CORS, disable, restart, traversal/symlink rejection')
     finally:

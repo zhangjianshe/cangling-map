@@ -734,6 +734,7 @@ async fn main() -> anyhow::Result<()> {
     // Restrict cross-origin access to these routes; import/upload APIs retain
     // the default same-origin policy.
     let public_terrain = Router::new()
+        .route("/api/3dtiles/discover", get(tiles3d::discover))
         .route("/3dtiles/{id}/tileset.json", get(tiles3d::entry))
         .route("/3dtiles/{id}/versions/{revision}/{*path}", get(tiles3d::asset))
         .route("/api/placenames/metadata", get(placenames::metadata))
