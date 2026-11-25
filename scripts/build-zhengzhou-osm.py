@@ -162,16 +162,52 @@ def glb(fs):
  low,high=enu.min(axis=0)-.1,enu.max(axis=0)+.1;c=(low+high)/2;half=(high-low)/2
  bv={'box':list(map(float,[*c,half[0],0,0,0,half[1],0,0,0,half[2]]))}
  return data,bv,len(pos)
-children=[];vertices=0
+# Coarse whole-district parent -> simplified whole-district parent -> 28 full-detail
+# spatial leaves. At most 30 geometry resources are needed, below Earth's 32 budget.
+# REPLACE keeps a ready parent visible while its children are being fetched.
+def simplify_features(fs, tolerance):
+ result=[]; max_error=0.
+ for f in fs:
+  original=f['geometry']
+  simplified=original.simplify(tolerance,preserve_topology=True)
+  error=original.boundary.hausdorff_distance(simplified.boundary)
+  if simplified.is_empty or not simplified.is_valid or error>tolerance*1.001:
+   simplified=original;error=0.
+  assert len(polygons(simplified))==len(polygons(original))
+  assert sum(len(p.interiors) for p in polygons(simplified))==sum(len(p.interiors) for p in polygons(original))
+  result.append({**f,'geometry':simplified});max_error=max(max_error,error)
+ return result,max_error
+
+children=[];vertices=0;lod_stats={}
 for (x,y),fs in sorted(tiles.items()):
  data,bv,count=glb(fs);name=f'buildings-{x}-{y}.glb';(source_dir/name).write_bytes(data);vertices+=count
- children.append({'boundingVolume':bv,'geometricError':0,'content':{'uri':name}})
+ children.append({'boundingVolume':bv,'geometricError':0,'content':{'uri':name},'extras':{'lod':'high'}})
 assert children,'No buildings found'
+lod_stats['high']={'vertices':vertices,'files':len(children),'toleranceMetres':0,'measuredErrorMetres':0,'geometricError':0}
+coarse={}
+for level,tolerance,error_budget in [('low',20.,40.),('medium',3.,6.)]:
+ fs,error=simplify_features(features,tolerance)
+ data,bv,count=glb(fs);name=f'buildings-{level}.glb';(source_dir/name).write_bytes(data)
+ coarse[level]={'boundingVolume':bv,'geometricError':error_budget,'refine':'REPLACE','content':{'uri':name},'extras':{'lod':level}}
+ lod_stats[level]={'vertices':count,'files':1,'bytes':len(data),'toleranceMetres':tolerance,'measuredErrorMetres':error,'geometricError':error_budget}
+ assert error<=error_budget and {f['id'] for f in fs}=={f['id'] for f in features}
+assert lod_stats['low']['vertices']<lod_stats['medium']['vertices']<vertices, 'LOD must reduce actual geometry'
+# All ancestors enclose the union of every level, including the leaf bounds.
+def union_bounds(bounds):
+ lows=[];highs=[]
+ for bv in bounds:
+  b=np.asarray(bv['box']);c=b[:3];half=np.abs(b[3:].reshape(3,3)).sum(axis=0)
+  lows.append(c-half);highs.append(c+half)
+ lo=np.min(lows,axis=0);hi=np.max(highs,axis=0);c=(lo+hi)/2;h=(hi-lo)/2
+ return {'box':list(map(float,[*c,h[0],0,0,0,h[1],0,0,0,h[2]]))}
+full_bounds=union_bounds([n['boundingVolume'] for n in children]+[n['boundingVolume'] for n in coarse.values()])
+coarse['medium']['boundingVolume']=full_bounds
+coarse['medium']['children']=children
+root=coarse['low'];root['boundingVolume']=full_bounds;root['children']=[coarse['medium']]
+root['transform']=world.flatten(order='F').tolist()
 counts=dict(collections.Counter(f['height_source'] for f in features))
-summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children),'vertices':vertices,'skipped':skip,'terrain':meta,'heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
-maxz=max(f['ground']+f['height'] for f in features)+10
-root={'boundingVolume':{'box':[0,0,maxz/2,1502,0,0,0,1502,0,0,0,maxz/2+10]},'transform':world.flatten(order='F').tolist(),'geometricError':500,'refine':'ADD','children':children}
-(source_dir/'tileset.json').write_text(json.dumps({'asset':{'version':'1.1','copyright':'© OpenStreetMap contributors; ODbL 1.0'},'geometricError':500,'root':root,'extras':{'heightSources':counts,'attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','bounds':'3km x 3km local AEQD square; WGS84'}},ensure_ascii=False,indent=2))
+summary={'name':'郑州郑东新区 CBD 3×3km OSM 建筑','center':[LON,LAT],'localBoundsMetres':[-1500,-1500,1500,1500],'areaKm2':9,'osmTimestamp':json.loads((ROOT/'osm-buildings.json').read_text()).get('osm3s'),'buildings':len(features),'heightSources':counts,'withBuildingLevels':sum(f['levels'] is not None for f in features),'tileCount':len(children)+2,'vertices':vertices,'lod':lod_stats,'skipped':skip,'terrain':meta,'heightRule':'height first; building:levels × 3m; missing 9m (estimated); flat roofs','baseRule':'max sampled Copernicus GLO-30 terrain + 0.5m per building; same numeric vertical reference as Earth, not a survey datum conversion','attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','rawSha256':hashlib.sha256((ROOT/'osm-buildings.json').read_bytes()).hexdigest()}
+(source_dir/'tileset.json').write_text(json.dumps({'asset':{'version':'1.1','copyright':'© OpenStreetMap contributors; ODbL 1.0'},'geometricError':root['geometricError'],'root':root,'extras':{'heightSources':counts,'attribution':'© OpenStreetMap contributors','license':'https://www.openstreetmap.org/copyright','bounds':'3km x 3km local AEQD square; WGS84','lod':lod_stats}},ensure_ascii=False,indent=2))
 (ROOT/'buildings.geojson').write_text(json.dumps({'type':'FeatureCollection','features':out_features},ensure_ascii=False))
 (ROOT/'report.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2))
 print(json.dumps({k:v for k,v in summary.items() if k not in ('terrain','skipped','osmTimestamp')},ensure_ascii=False,indent=2))

@@ -26,14 +26,14 @@ Overpass节点在本次下载时连接失败，最终使用完整OSM XML，并�
 
 - 数据目录：`~/.local/share/cangling-map-local/tiles3d/zhengzhou-cbd-osm/`
 - 稳定入口：`http://127.0.0.1:4310/3dtiles/zhengzhou-cbd-osm/tileset.json`
-- 版本：`555dc57e0fadbcac4f0a362994a2df0f1bf650a04b757ce11b0f609827c834e8`
-- 28个非空500米网格分块、35,847顶点、29个发布文件（含tileset）。
+- 版本：`e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71`
+- 28个完整500米网格分块，加远/中景各一个模型，共30个几何资源、31个发布文件（含tileset）。
 - Keeper独立项目：郑州 CBD · OSM 三维建筑。
 - 地球地址：`http://127.0.0.1:4301/earth-window.html?project=5b996eff-0058-4317-8ad7-cd93a688e4d5`
 
 浏览器原生WASM/WebGL2正射、45°视角和刷新恢复通过：28个瓦片loaded/drawing，
 pending=0、errors=[]、budgetLimited=false。建筑明暗与立体挤出可见。
-本示例采用空间分块和视锥裁剪，没有生成多精度LOD；不要将距离变化称为几何LOD验证。
+已增加以下三级几何LOD，采用REPLACE而非叠加绘制。
 原有Dragon和general场景未修改，服务仅发布在本机。
 
 ## 重建
@@ -48,3 +48,42 @@ python scripts/build-zhengzhou-osm.py --data-root /path/to/zhengzhou-cbd-osm
 
 再按3D Tiles管理API登记、校验、发布。脚本验证三角剖分面积（含内院）、有限法线和顶点预算；
 每次构建后应调用Map的validate再发布，已有发布版本不受source文件重建影响。
+
+## 三级 LOD（2026-11-25）
+
+| 级别 | 轮廓简化容差 | 顶点数 | 几何文件 | geometricError |
+| --- | ---: | ---: | ---: | ---: |
+| 远景 low | 20m | 14,850 | 1 | 40m |
+| 中景 medium | 3m | 24,102 | 1 | 6m |
+| 近景 high | 原始轮廓 | 35,847 | 28 | 0 |
+
+低/中景保持拓扑（建筑分部和内院数量）、485个OSM对象ID与原有高度。
+实际轮廓Hausdorff误差最大约19.858m、2.990m；声明两倍容差作为保守几何误差。
+远景减少约59%的顶点，中景减少约33%。近景GLB与上一版逐字节一致。
+
+层级为一个low根节点 → 一个medium节点 → 28个空间叶节点；祖先包围体
+覆盖所有级别几何，最多30个资源，不调整Earth的32资源预算。
+父级使用REPLACE，在子级就绪前保留已有父级，避免重复叠加。
+
+切换依据Earth原生屏幕空间误差（当前图层阈值16），同时受视距、视口、
+相机倾角和包围体影响，不是固定的相机高度断点。
+本机浏览器正射视角实测：
+
+| 相机高度 | selectedContents | loaded / drawing |
+| --- | --- | --- |
+| 12,000m | buildings-low.glb | 1 / 1 |
+| 6,500m | buildings-medium.glb | 2 / 1 |
+| 3,500m | buildings-X-Y.glb（完整叶节点） | 30 / 28 |
+
+各级pending=0、errors=[]、budgetLimited=false。高→低回退释放子资源，
+再次中→高加载、刷新后恢复30个已加载资源/28个绘制叶节点通过。验收读取原生选中资源和相机命令确认版本，不只比较截图。
+
+新增数据验证：
+
+```bash
+python scripts/test-zhengzhou-lod.py --data-root /path/to/zhengzhou-cbd-osm
+```
+
+验证三级顶点递增、同一组OSM对象、单位法线、所有GLB顶点落入包围体、
+父包围体包含子包围体、REPLACE树和资源预算。Map validate/publish通过。
+原始单级发布版本继续保留，可按原版本URL访问。
