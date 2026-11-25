@@ -1,0 +1,51 @@
+{
+  "server": {
+    "name": "cangling-map",
+    "version": "0.1.27"
+  },
+  "tools": [
+    "search_3d_datasets",
+    "get_3d_dataset"
+  ],
+  "datasets": [
+    {
+      "bounds": [
+        -75.62040895761642,
+        40.03970193530029,
+        -75.60377965803254,
+        40.04535868720099
+      ],
+      "boundsKind": "boundingVolumeEnvelope",
+      "crs": "EPSG:4326",
+      "description": null,
+      "id": "stanford-dragon",
+      "name": "Stanford Dragon · 三级LOD",
+      "source": null,
+      "tilesetPath": "3dtiles/stanford-dragon/versions/c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566/tileset.json",
+      "tilesetUrl": "https://train.cangling.cn/geoserver/3dtiles/stanford-dragon/versions/c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566/tileset.json",
+      "type": "3dtiles",
+      "updatedAt": "2026-11-25 04:09:06",
+      "version": "c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566"
+    },
+    {
+      "bounds": [
+        113.71160923489593,
+        34.761476680540355,
+        113.74439053703207,
+        34.788336087866085
+      ],
+      "boundsKind": "boundingVolumeEnvelope",
+      "crs": "EPSG:4326",
+      "description": null,
+      "id": "zhengzhou-cbd-osm",
+      "name": "郑州 CBD 3×3km · 三级LOD · © OpenStreetMap contributors",
+      "source": null,
+      "tilesetPath": "3dtiles/zhengzhou-cbd-osm/versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/tileset.json",
+      "tilesetUrl": "https://train.cangling.cn/geoserver/3dtiles/zhengzhou-cbd-osm/versions/e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71/tileset.json",
+      "type": "3dtiles",
+      "updatedAt": "2026-11-25 04:09:06",
+      "version": "e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71"
+    }
+  ],
+  "originRejection": 403
+}

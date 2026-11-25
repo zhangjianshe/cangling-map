@@ -111,3 +111,18 @@ Tile 数据文件为主机 `/opt/cl/local/cangling/tiledata/.tiles3d-cache.sqlit
 - 新 Pod Ready 1/1，重启数 0。此次只替换 Map，未替换 Keeper 客户端或改动 Tile 服务；未做浏览器视觉验收。
 - 直接回退可将 command 改回 `/data/deploy/20261125-cache/map-server`。若新版本上线后产生了新的发布操作，回退旧程序前需先同步发布状态，不能直接使用旧全局库记录。
 - 校验结果：`docs/validation/train-dataset-sqlite.json`。
+
+## MCP 与数据集目录部署（2026-11-25）
+
+- 构建提交：`e69f7a0`；`cargo build --release --locked -p map-server`。
+- 新 command：`/data/deploy/20261125-mcp/map-server`。
+- 二进制 SHA-256：`2e0a1e6980fc192fb19f7973aa65bcd4494762c5260d6cfac8f9a197c82369d7`，上传后核验一致。
+- 环境：`MAP_PUBLIC_BASE_URL=https://train.cangling.cn/geoserver/`，MCP返回完整版本化资源URL。
+- 部署备份：`/opt/cl/local/cangling/cangling-map/deployment-backup-20261125-mcp/map.json`（限制权限）。
+- 现有Nginx通用/geoserver/路由可转发POST /mcp，无需修改网关；原发布管理写接口保护保留。
+- Pod `cangling-map-9ff884cf-shf75`，Ready 1/1，重启0。
+- 公网MCP initialize、tools/list、搜索和详情成功，Dragon/郑州版本入口均可读取；未知ID返回isError，非允许Origin返回403。
+- 验证记录：`docs/validation/train-map-mcp.json`。
+- Keeper使用公网MCP通过隔离数据库/模拟模型完成审批、查询、详情、Earth场景加载/定位/状态、重启和账户隔离测试；未执行浏览器视觉验收。
+- 本机Keeper已更新启动，默认地图服务改为公网MCP并重新发现两个工具，兼容HTTP目录根地址也切换到train。
+- 若回退，按备份恢复command及MAP_PUBLIC_BASE_URL原配置；旧command为`/data/deploy/20261125-dataset-sqlite/map-server`。回退后不再提供MCP/目录发现新功能，原数据集SQLite及版本文件不需改动。
