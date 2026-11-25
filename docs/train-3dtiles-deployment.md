@@ -1,4 +1,4 @@
-> 历史部署记录：下文缓存接入描述的是 train 上此前部署版本。当前源码已改为数据集目录内 SQLite 管理发布、Map 直接输出文件，见 [当前规范](3dtiles.md)。本轮尚未部署 train；旧缓存测试脚本已移除。
+> 历史部署记录：下文缓存接入描述的是 train 上此前部署版本。当前源码已改为数据集目录内 SQLite 管理发布、Map 直接输出文件，见 [当前规范](3dtiles.md)。现已部署独立 SQLite 版本，见文末；旧缓存测试脚本已移除。
 
 # train.cangling.cn 三维演示部署（2026-11-25）
 
@@ -99,3 +99,15 @@ Tile 数据文件为主机 `/opt/cl/local/cangling/tiledata/.tiles3d-cache.sqlit
 - 浏览器操作后Tile持久命中计数Dragon从4增至8、郑州从31增至32；浏览器已缓存资源的304不会增加该值。
 - 两个本机Keeper演示项目均使用train公网Map地址。
 - 正式Tile重启后仍保留35个对象；两套数据再次Range读取均为206 + HIT；Map和Tile最终均1/1 Ready、0次容器重启。
+
+## 数据集 SQLite 版本部署
+
+- 源码提交：`82e3415`；`cargo build --release --locked -p map-server`。
+- 当前 command：`/data/deploy/20261125-dataset-sqlite/map-server`。
+- 二进制 SHA-256：`af6fe6c488a154842eb20984471a345428c8e1a3392e8bf42a17809cfd7ffcba`。
+- 部署及在线 SQLite 备份：`/opt/cl/local/cangling/cangling-map/deployment-backup-20261125-dataset-sqlite/`。
+- 启动自动迁移 Dragon 与郑州发布记录至各自 `dataset.sqlite`；两库 integrity_check 均为 ok，版本保持不变，分别 4/31 个文件。
+- 公网所有 35 个文件 SHA-256 匹配，稳定入口均包含原版本路径，模型 Range 返回 206，响应 `X-Tiles3d-Cache: DISABLED`。
+- 新 Pod Ready 1/1，重启数 0。此次只替换 Map，未替换 Keeper 客户端或改动 Tile 服务；未做浏览器视觉验收。
+- 直接回退可将 command 改回 `/data/deploy/20261125-cache/map-server`。若新版本上线后产生了新的发布操作，回退旧程序前需先同步发布状态，不能直接使用旧全局库记录。
+- 校验结果：`docs/validation/train-dataset-sqlite.json`。

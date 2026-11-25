@@ -1,0 +1,14 @@
+{
+  "stanford-dragon": {
+    "revision": "c34549b2fa543e6c1c487bb33fcc4f6be3164508ab4f4397ae00a7616ab7f566",
+    "files_verified": 4,
+    "cache": "DISABLED",
+    "range": 206
+  },
+  "zhengzhou-cbd-osm": {
+    "revision": "e29e9063f176bdd9389f093841798b45aab053d6048e1ff8c39c37ab451c2a71",
+    "files_verified": 31,
+    "cache": "DISABLED",
+    "range": 206
+  }
+}
