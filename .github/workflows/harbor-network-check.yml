@@ -1,0 +1,35 @@
+name: Harbor network diagnostics
+on:
+  push:
+    branches: [codex/harbor-network-check]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    steps:
+      - name: DNS and TLS diagnostics without credentials
+        shell: bash
+        run: |
+          set +e
+          echo "Runner: $RUNNER_OS $RUNNER_ARCH"
+          curl -sS --max-time 15 https://api.ipify.org
+          echo
+          nslookup harbor.cangling.cn
+          for flags in '-4' '-4 --tls-max 1.2' '-6'; do
+            echo "=== Harbor $flags ==="
+            curl $flags --noproxy '*' -v --connect-timeout 15 --max-time 22 -o /dev/null -w 'http=%{http_code} ip=%{remote_ip} tcp=%{time_connect} tls=%{time_appconnect}\n' https://harbor.cangling.cn:22002/v2/
+          done
+          echo '=== Fixed current IPv4 ==='
+          curl -4 --noproxy '*' -v --resolve harbor.cangling.cn:22002:123.113.39.52 --connect-timeout 15 --max-time 22 -o /dev/null https://harbor.cangling.cn:22002/v2/
+          echo '=== Shared gateway, other hostname ==='
+          curl -4 --noproxy '*' -v --connect-timeout 15 --max-time 22 -o /dev/null https://soft.cangling.cn:22002/
+          echo '=== Default HTTPS port ==='
+          curl -4 --noproxy '*' -v --connect-timeout 15 --max-time 22 -o /dev/null https://harbor.cangling.cn/v2/
+          exit 0
