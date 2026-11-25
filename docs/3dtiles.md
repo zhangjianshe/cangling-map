@@ -1,6 +1,6 @@
 # 3D Tiles 数据集发布（第一轮）
 
-本轮提供已有 3D Tiles 的校验、快照发布和 HTTP 访问，不生成 LOD，也未在 Cangling Earth 中实现瓦片树遍历。
+提供已有 3D Tiles 的校验、快照发布和 HTTP 访问。Earth 原生读取显式瓦片树并进行 LOD 选择；本模块不负责生产模型。
 协议依据：https://github.com/CesiumGS/3d-tiles/tree/main/specification 。
 
 ## 数据准备与管理
@@ -10,6 +10,7 @@
 ```text
 TILES3D_DATA_ROOT/
   buildings/
+    dataset.sqlite             # 数据集独立的发布数据库
     source/tileset.json
     source/tiles/0.glb
     versions/<SHA-256>/tileset.json
@@ -18,7 +19,7 @@ TILES3D_DATA_ROOT/
 
 打开 `/3dtiles`，登记数据集 ID 和名称，将源文件复制到指定 source 目录，点击「校验」，然后「发布」。可以查看文件数、字节数、根包围体以及复制服务入口。更新数据后再次发布会生成内容寻址的新版本；相同内容复用版本。修改名称不会改变发布内容。
 
-数据库只保存数据集、当前版本、启用状态和各版本的文件清单。实际瓦片保存在版本目录。发布先将通过校验的同一份字节写入临时目录，完成后原子重命名，最后以数据库事务更新当前版本；失败不替换当前版本。未引用文件（例如旁边的说明或私有文件）不会发布。旧版本保留；本轮不提供自动清理。
+每个目录的 `dataset.sqlite` 保存数据集、当前版本、启用状态、各版本清单以及按版本/路径索引的文件元数据。三维请求不再读取全局 catalog 的发布记录；全局数据库仅作为旧版迁移来源。实际瓦片保存在版本目录。发布先将通过校验的同一份字节写入临时目录，完成后原子重命名，最后以数据库事务更新当前版本；失败不替换当前版本。未引用文件（例如旁边的说明或私有文件）不会发布。旧版本保留；本轮不提供自动清理。
 
 本模块遵循现有管理 API 的部署方式：管理端应仅开放给受信任管理员，并由网关实施认证。只读 `/3dtiles/{id}/...` 开放 GET/HEAD CORS；写入 API 拒绝浏览器跨站请求。**不要把无认证的管理 API 直接暴露到公网。** 文件目录应仅由服务与受信任管理员写入；发布后不要直接改动 versions 内容。
 
@@ -73,3 +74,19 @@ python3 -m http.server 4318 --bind 127.0.0.1 --directory /tmp/cangling-tiles3d-c
 # 浏览器打开 http://127.0.0.1:4318/?base=<测试脚本打印的BROWSER_BASE>
 # 成功时页面显示 PASS、Cesium 版本和已渲染三角形数量。
 ```
+
+## 数据集独立发布库（2026-11-25）
+
+- 每个数据集目录可独立迁移。目录名须与数据库中的数据集 ID 一致。
+- 启动时将旧全局 catalog 中的发布记录及全部历史版本事务性导入对应 `dataset.sqlite`；保留旧记录以供回退检查。已有本地记录优先，后续不会被旧库覆盖或重新启用。
+- 管理列表扫描数据目录发现独立数据库；换用空的全局 catalog 后，仍可读取已发布数据集。
+- SQLite 使用 WAL；备份运行中的数据库应使用 SQLite backup API，或停服务后复制整个目录。不要运行时只复制 `.sqlite` 而遗漏 WAL。
+- `tiles3d_datasets` 管理当前版本和启用状态，`tiles3d_versions` 保存完整清单，`tiles3d_files` 按 `(dataset_id,revision,path)` 提供内容查询。GLB/JSON 数据本身仍在磁盘，未存入 SQLite BLOB。
+- 发布顺序仍为写临时文件、完成快照、提交本地数据库事务。旧版本保留；此次不增加生产任务、自动清理或隐式瓦片支持。
+- 三维文件直接由 Map 流式输出。`TILES3D_CACHE_URL/TOKEN` 对三维访问不再生效，即使旧部署仍设置它们，也不会请求 cangling-tile。二维缓存不受影响。
+- HTTP 兼容原有稳定入口、版本 URL、Range/HEAD/ETag 与停用规则。响应 `X-Tiles3d-Cache: DISABLED` 表示未经过 Tile。
+- Earth 在场景版本变化时清除旧瓦片树，并以 `no-store` 获取根入口；本次加载的子资源仍指向根入口给出的固定版本，避免加载中混用新旧发布。
+
+本机回归：`python3 scripts/test-3dtiles.py` 覆盖旧库迁移、旧版本保留、停用后重启、空全局库目录发现，以及失效 Tile 地址下的直接读取。
+
+本次验证：Map 服务端 30 项测试、catalog 11 项测试、隔离 HTTP 发布/迁移回归通过；Keeper Earth 传输与桥接测试通过。没有改动远端部署，也未进行浏览器视觉验收。

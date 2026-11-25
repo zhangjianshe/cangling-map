@@ -1,3 +1,5 @@
+> 历史部署记录：下文缓存接入描述的是 train 上此前部署版本。当前源码已改为数据集目录内 SQLite 管理发布、Map 直接输出文件，见 [当前规范](3dtiles.md)。本轮尚未部署 train；旧缓存测试脚本已移除。
+
 # train.cangling.cn 三维演示部署（2026-11-25）
 
 主机：`ssh -p2225 root@changping.cangling.cn`，hostname master，K3s namespace cangling。

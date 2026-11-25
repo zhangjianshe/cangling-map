@@ -67,7 +67,7 @@ mod leadership;
 mod placenames;
 mod terrain;
 mod tiles3d;
-mod tiles3d_cache;
+
 
 static MISSING_STYLE_ASSET_WARNINGS: OnceLock<std::sync::Mutex<HashSet<String>>> = OnceLock::new();
 
@@ -637,6 +637,7 @@ async fn main() -> anyhow::Result<()> {
     let catalog = SqliteCatalog::connect(&database_url)
         .await
         .context("failed to initialize catalog")?;
+    tiles3d::migrate(&catalog).await.context("failed to migrate dataset publication databases")?;
     let imagery_database_url = std::env::var("IMAGERY_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://imagery.db?mode=rwc".into());
     let imagery_index_database_url = std::env::var("IMAGERY_INDEX_DATABASE_URL")

@@ -22,6 +22,61 @@ fn root() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("data/3dtiles"))
 }
+// Pools release idle connections; the directory database is the sole publication authority.
+async fn store(id: &str, create: bool) -> Result<map_catalog::SqliteCatalog, Error> {
+    map_3dtiles::valid_id(id).map_err(bad)?;
+    static STORES: OnceLock<
+        tokio::sync::Mutex<std::collections::HashMap<PathBuf, map_catalog::SqliteCatalog>>,
+    > = OnceLock::new();
+    let mut stores = STORES.get_or_init(Default::default).lock().await;
+    let directory = root().join(id);
+    if create {
+        tokio::fs::create_dir_all(root()).await.map_err(internal)?;
+        // Validate existing ancestors before creating anything below a dataset directory.
+        if directory.exists() {
+            map_3dtiles::safe_path(&root(), id).map_err(bad)?;
+        }
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(internal)?;
+        map_3dtiles::safe_path(&root(), id).map_err(bad)?;
+        tokio::fs::create_dir_all(directory.join("source"))
+            .await
+            .map_err(internal)?;
+    }
+    map_3dtiles::safe_path(&root(), id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "数据集目录不存在".into()))?;
+    let path = directory.join("dataset.sqlite");
+    if !create && !path.exists() {
+        return Err((StatusCode::NOT_FOUND, "数据集未登记".into()));
+    }
+    // SQLite sidecars are also inside the trusted dataset directory.
+    for name in ["dataset.sqlite", "dataset.sqlite-wal", "dataset.sqlite-shm"] {
+        if tokio::fs::symlink_metadata(directory.join(name))
+            .await
+            .is_ok()
+        {
+            map_3dtiles::safe_path(&root(), &format!("{id}/{name}")).map_err(bad)?;
+        }
+    }
+    if let Some(db) = stores.get(&path) {
+        return Ok(db.clone());
+    }
+    let db = map_catalog::SqliteCatalog::open_tiles3d(&path)
+        .await
+        .map_err(internal)?;
+    stores.insert(path, db.clone());
+    Ok(db)
+}
+pub(crate) async fn migrate(catalog: &map_catalog::SqliteCatalog) -> anyhow::Result<()> {
+    for dataset in catalog.list_tiles3d().await? {
+        let local = store(&dataset.id, true)
+            .await
+            .map_err(|(_, e)| anyhow::anyhow!(e))?;
+        local.import_tiles3d(catalog, &dataset).await?;
+    }
+    Ok(())
+}
 fn writes(headers: &HeaderMap) -> Result<(), Error> {
     if headers
         .get("sec-fetch-site")
@@ -32,18 +87,39 @@ fn writes(headers: &HeaderMap) -> Result<(), Error> {
     }
     Ok(())
 }
-async fn dataset(s: &AppState, id: &str) -> Result<map_catalog::Tiles3dDataset, Error> {
+async fn dataset(_s: &AppState, id: &str) -> Result<map_catalog::Tiles3dDataset, Error> {
     map_3dtiles::valid_id(id).map_err(bad)?;
-    s.catalog
+    store(id, false)
+        .await?
         .get_tiles3d(id)
         .await
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "数据集不存在".into()))
 }
-pub(crate) async fn list(State(s): State<AppState>) -> Result<Json<Value>, Error> {
-    Ok(Json(
-        json!({"datasets":s.catalog.list_tiles3d().await.map_err(internal)?}),
-    ))
+pub(crate) async fn list(State(_s): State<AppState>) -> Result<Json<Value>, Error> {
+    let mut datasets = Vec::new();
+    if root().exists() {
+        let mut entries = tokio::fs::read_dir(root()).await.map_err(internal)?;
+        while let Some(entry) = entries.next_entry().await.map_err(internal)? {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if !entry.file_type().await.map_err(internal)?.is_dir()
+                || map_3dtiles::valid_id(&id).is_err()
+                || !entry.path().join("dataset.sqlite").exists()
+            {
+                continue;
+            }
+            if let Some(d) = store(&id, false)
+                .await?
+                .get_tiles3d(&id)
+                .await
+                .map_err(internal)?
+            {
+                datasets.push(d);
+            }
+        }
+    }
+    datasets.sort_by(|a, b| (&a.title, &a.id).cmp(&(&b.title, &b.id)));
+    Ok(Json(json!({"datasets":datasets})))
 }
 #[derive(Deserialize)]
 pub(crate) struct Registration {
@@ -61,7 +137,8 @@ pub(crate) async fn register(
     if title.is_empty() || title.chars().count() > 128 {
         return Err(bad("名称须为1–128字符"));
     }
-    s.catalog
+    store(&id, true)
+        .await?
         .register_tiles3d(&id, title)
         .await
         .map_err(internal)?;
@@ -109,7 +186,8 @@ pub(crate) async fn publish(
         .await
         .map_err(internal)?
         .map_err(bad)?;
-    s.catalog
+    store(&id, false)
+        .await?
         .publish_tiles3d(&id, &manifest.revision, &json!(manifest))
         .await
         .map_err(internal)?;
@@ -124,7 +202,11 @@ pub(crate) async fn disable(
 ) -> Result<Json<Value>, Error> {
     writes(&headers)?;
     dataset(&s, &id).await?;
-    s.catalog.disable_tiles3d(&id).await.map_err(internal)?;
+    store(&id, false)
+        .await?
+        .disable_tiles3d(&id)
+        .await
+        .map_err(internal)?;
     Ok(Json(json!({"dataset":dataset(&s,&id).await?})))
 }
 pub(crate) async fn detail(
@@ -133,7 +215,8 @@ pub(crate) async fn detail(
 ) -> Result<Json<Value>, Error> {
     let d = dataset(&s, &id).await?;
     let manifest = if let Some(ref rev) = d.revision {
-        s.catalog
+        store(&id, false)
+            .await?
             .tiles3d_manifest(&id, rev)
             .await
             .map_err(internal)?
@@ -159,30 +242,20 @@ pub(crate) async fn entry(
     // URL rather than a redirect's final URL (including Cesium Resource).
     let full = map_3dtiles::safe_path(&root(), &format!("{id}/versions/{rev}/tileset.json"))
         .map_err(bad)?;
-    let manifest = s
-        .catalog
+    let manifest = store(&id, false)
+        .await?
         .tiles3d_manifest(&id, &rev)
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("版本清单不存在"))?;
     let info = &manifest["files"]["tileset.json"];
-    let cached = crate::tiles3d_cache::load(
-        &s,
-        &id,
-        &rev,
-        "tileset.json",
-        info["sha256"].as_str().unwrap_or(""),
-        info["bytes"].as_u64().unwrap_or(u64::MAX),
-        &full,
-    )
-    .await;
-    let (data, cache_status) = match cached.map_err(internal)? {
-        Some(v) => v,
-        None => (
-            bytes::Bytes::from(tokio::fs::read(full).await.map_err(internal)?),
-            "BYPASS",
-        ),
-    };
+    let data = tokio::fs::read(full).await.map_err(internal)?;
+    use sha2::Digest;
+    if info["bytes"].as_u64() != Some(data.len() as u64)
+        || info["sha256"].as_str() != Some(format!("{:x}", sha2::Sha256::digest(&data)).as_str())
+    {
+        return Err(internal("发布入口完整性校验失败"));
+    }
     let mut document: Value = serde_json::from_slice(&data).map_err(internal)?;
     fn qualify(tile: &mut Value, prefix: &str) {
         if let Some(content) = tile.get_mut("content") {
@@ -210,7 +283,7 @@ pub(crate) async fn entry(
     let mut response = Json(document).into_response();
     response
         .headers_mut()
-        .insert("x-tiles3d-cache", cache_status.parse().unwrap());
+        .insert("x-tiles3d-cache", "DISABLED".parse().unwrap());
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
@@ -229,14 +302,11 @@ pub(crate) async fn asset(
         return Err(bad("版本无效"));
     }
     map_3dtiles::relative(&path).map_err(bad)?;
-    let manifest = s
-        .catalog
-        .tiles3d_manifest(&id, &revision)
+    let info = store(&id, false)
+        .await?
+        .tiles3d_file(&id, &revision, &path)
         .await
         .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "版本不存在".into()))?;
-    let info = manifest["files"]
-        .get(&path)
         .ok_or((StatusCode::NOT_FOUND, "文件未发布".into()))?;
     let full = map_3dtiles::safe_path(&root(), &format!("{id}/versions/{revision}/{path}"))
         .map_err(|_| (StatusCode::NOT_FOUND, "文件不存在".into()))?;
@@ -261,33 +331,15 @@ pub(crate) async fn asset(
         )
             .into_response());
     }
-    let cached = crate::tiles3d_cache::load(
-        &s,
-        &id,
-        &revision,
-        &path,
-        info["sha256"].as_str().unwrap_or(""),
-        info["bytes"].as_u64().unwrap_or(u64::MAX),
-        &full,
-    )
-    .await;
-    let (mut response, cache_status) = match cached.map_err(internal)? {
-        Some((data, status)) => (cached_response(data, &request, &etag), status),
-        None => {
-            let mut service = tower_http::services::ServeFile::new(full);
-            (
-                service
-                    .try_call(request)
-                    .await
-                    .map_err(internal)?
-                    .map(Body::new),
-                "BYPASS",
-            )
-        }
-    };
+    let mut service = tower_http::services::ServeFile::new(full);
+    let mut response = service
+        .try_call(request)
+        .await
+        .map_err(internal)?
+        .map(Body::new);
     response
         .headers_mut()
-        .insert("x-tiles3d-cache", cache_status.parse().unwrap());
+        .insert("x-tiles3d-cache", "DISABLED".parse().unwrap());
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         info["mime"]
@@ -307,108 +359,4 @@ pub(crate) async fn asset(
         .headers_mut()
         .insert("x-content-type-options", "nosniff".parse().unwrap());
     Ok(response)
-}
-
-// Single byte ranges cover GLB/B3DM readers. Multiple ranges are legally ignored
-// with a full 200 response, rather than returning an invalid multipart body.
-fn cached_response(data: bytes::Bytes, request: &Request, etag: &str) -> Response {
-    let len = data.len();
-    let range = request
-        .headers()
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok());
-    let if_range = request
-        .headers()
-        .get(header::IF_RANGE)
-        .and_then(|v| v.to_str().ok());
-    let mut start = 0;
-    let mut end = len;
-    let mut status = StatusCode::OK;
-    if if_range.is_none() || if_range == Some(etag) {
-        if let Some(range) = range.filter(|r| r.starts_with("bytes=") && !r.contains(',')) {
-            let parsed = range[6..].split_once('-').and_then(|(a, b)| {
-                if a.is_empty() {
-                    b.parse::<usize>()
-                        .ok()
-                        .filter(|n| *n > 0)
-                        .map(|n| (len.saturating_sub(n), len))
-                } else {
-                    let first = a.parse::<usize>().ok()?;
-                    let last = if b.is_empty() {
-                        len
-                    } else {
-                        b.parse::<usize>().ok()?.saturating_add(1).min(len)
-                    };
-                    Some((first, last))
-                }
-            });
-            match parsed {
-                Some((a, b)) if a < b && a < len => {
-                    start = a;
-                    end = b;
-                    status = StatusCode::PARTIAL_CONTENT;
-                }
-                _ => {
-                    return (
-                        StatusCode::RANGE_NOT_SATISFIABLE,
-                        [(header::CONTENT_RANGE, format!("bytes */{len}"))],
-                    )
-                        .into_response()
-                }
-            }
-        }
-    }
-    let mut response = Response::new(if request.method() == axum::http::Method::HEAD {
-        Body::empty()
-    } else {
-        Body::from(data.slice(start..end))
-    });
-    *response.status_mut() = status;
-    response
-        .headers_mut()
-        .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        (end - start).to_string().parse().unwrap(),
-    );
-    if status == StatusCode::PARTIAL_CONTENT {
-        response.headers_mut().insert(
-            header::CONTENT_RANGE,
-            format!("bytes {start}-{}/{len}", end - 1).parse().unwrap(),
-        );
-    }
-    response
-}
-#[cfg(test)]
-mod cache_tests {
-    use super::*;
-    #[tokio::test]
-    async fn cached_ranges_and_head() {
-        for (range, code, length) in [
-            ("bytes=2-4", 206, "3"),
-            ("bytes=-2", 206, "2"),
-            ("bytes=9-", 416, ""),
-            ("bytes=0-0,2-2", 200, "6"),
-        ] {
-            let req = Request::builder()
-                .header(header::RANGE, range)
-                .body(Body::empty())
-                .unwrap();
-            let res = cached_response(bytes::Bytes::from_static(b"abcdef"), &req, "etag");
-            assert_eq!(res.status().as_u16(), code);
-            if code != 416 {
-                assert_eq!(res.headers()[header::CONTENT_LENGTH], length);
-            }
-        }
-        let req = Request::builder()
-            .method("HEAD")
-            .body(Body::empty())
-            .unwrap();
-        let res = cached_response(bytes::Bytes::from_static(b"abcdef"), &req, "etag");
-        assert_eq!(res.headers()[header::CONTENT_LENGTH], "6");
-        assert!(axum::body::to_bytes(res.into_body(), 100)
-            .await
-            .unwrap()
-            .is_empty());
-    }
 }

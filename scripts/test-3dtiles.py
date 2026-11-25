@@ -70,6 +70,35 @@ with tempfile.TemporaryDirectory(prefix='map-3dtiles-') as temp:
         (source/'model.glb').write_bytes(b'changed');assert req(prefix+'/model.glb')[0]==glb
         proc.terminate();proc.wait(10);start();assert api('/api/3dtiles/demo')['dataset']['revision']==rev2
         assert req(prefix+'/model.glb')[0]==glb
+        # Dataset-local authority and exact file lookup, independent of the global catalog.
+        local_db=root/'data/demo/dataset.sqlite'
+        with sqlite3.connect(local_db) as db:
+            assert db.execute('SELECT count(*) FROM tiles3d_versions').fetchone()[0]==2
+            assert db.execute('SELECT count(*) FROM tiles3d_files').fetchone()[0]==5
+            records=db.execute('SELECT * FROM tiles3d_datasets').fetchall()
+            versions=db.execute('SELECT * FROM tiles3d_versions').fetchall()
+        assert headers.get('X-Tiles3d-Cache')=='DISABLED'
+        # Simulate upgrade from the legacy global publication database.
+        proc.terminate();proc.wait(10)
+        with sqlite3.connect(root/'catalog.db') as db:
+            db.executemany('INSERT INTO tiles3d_datasets VALUES(?,?,?,?,?)',records)
+            db.executemany('INSERT INTO tiles3d_versions VALUES(?,?,?,?)',versions)
+        for suffix in ['', '-wal', '-shm']:
+            Path(str(local_db)+suffix).unlink(missing_ok=True)
+        start();assert api('/api/3dtiles/demo')['dataset']['revision']==rev2
+        assert req(prefix+'/model.glb')[0]==glb
+        # Restart must not resurrect a locally disabled dataset from legacy records.
+        api('/api/3dtiles/demo/disable','POST');proc.terminate();proc.wait(10);start()
+        req('/3dtiles/demo/tileset.json',status=404)
+        api('/api/3dtiles/demo/publish','POST')
+        # A different global catalog discovers the complete dataset directory.
+        proc.terminate();proc.wait(10)
+        env['CATALOG_DATABASE_URL']=f'sqlite://{root}/new-catalog.db?mode=rwc'
+        env['TILES3D_CACHE_URL']='http://127.0.0.1:1'
+        env['TILES3D_CACHE_TOKEN']='must-not-be-used'
+        start();assert api('/api/3dtiles')['datasets'][0]['id']=='demo'
+        assert req(prefix+'/model.glb')[0]==glb
+        assert req('/3dtiles/demo/tileset.json')[1]['X-Tiles3d-Cache']=='DISABLED'
         if os.environ.get('TILES3D_BROWSER_TEST'):
             api('/api/3dtiles/demo','PUT',{'title':'3D Tiles 验证数据集'})
             print('BROWSER_BASE='+base,flush=True)
